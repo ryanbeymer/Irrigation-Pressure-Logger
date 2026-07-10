@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Irrigation Pressure Logger Wiring Guide</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --text: #172026;
+      --muted: #5d6b76;
+      --line: #d8dee4;
+      --panel: #f7f9fb;
+      --accent: #0f766e;
+      --warning: #8a4b00;
+      --warning-bg: #fff7e6;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background: #ffffff;
+      line-height: 1.5;
+    }
+
+    main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+      line-height: 1.15;
+    }
+
+    h2 {
+      margin: 32px 0 12px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      font-size: 1.35rem;
+    }
+
+    p {
+      margin: 8px 0 14px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      margin-bottom: 24px;
+    }
+
+    .notice {
+      border: 1px solid #f1c27d;
+      background: var(--warning-bg);
+      color: var(--warning);
+      padding: 14px 16px;
+      border-radius: 6px;
+      margin: 20px 0;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 14px 16px;
+      margin: 14px 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 20px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--panel);
+    }
+
+    code,
+    pre {
+      font-family: Menlo, Consolas, monospace;
+      background: #eef2f5;
+      border-radius: 4px;
+    }
+
+    code {
+      padding: 2px 5px;
+    }
+
+    pre {
+      padding: 12px;
+      overflow-x: auto;
+    }
+
+    ol,
+    ul {
+      padding-left: 1.4rem;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    .checklist li {
+      margin: 9px 0;
+    }
+
+    .ok {
+      color: var(--accent);
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Irrigation Pressure Logger Wiring Guide</h1>
+    <p class="subtitle">Use this staged checklist so each part can be wired cleanly. The current firmware verifies only Step 1; later hardware status checks need the hardware-enabled firmware milestone.</p>
+
+    <section class="notice">
+      <strong>Voltage warning:</strong> do not feed a 4.5 V pressure sensor output into an ADS1115 powered from 3.3 V.
+      Power the ADS1115 from 5 V with I2C level shifting, or use a voltage divider before ADS1115 A0.
+    </section>
+
+    <section>
+      <h2>Step 1: ESP32 Only</h2>
+      <ol class="checklist">
+        <li>Plug the ESP32 into USB.</li>
+        <li>Upload the firmware.</li>
+        <li>Open the serial monitor.</li>
+        <li>Confirm the logger startup message appears.</li>
+        <li>Connect a phone or laptop to Wi-Fi network <code>IrrigationLogger</code>.</li>
+        <li>Open <code>http://192.168.4.1</code>.</li>
+      </ol>
+
+      <pre><code>pio run -t upload
+pio device monitor -b 115200</code></pre>
+
+      <div class="panel">
+        Expected result: the ESP32 boots, starts the access point, and serves the local web page.
+      </div>
+    </section>
+
+    <section>
+      <h2>Step 2: DS3231 RTC</h2>
+      <p>Wire the DS3231 first because it is a simple I2C device.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>DS3231</th>
+            <th>ESP32</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>VCC</td>
+            <td>3V3</td>
+          </tr>
+          <tr>
+            <td>GND</td>
+            <td>GND</td>
+          </tr>
+          <tr>
+            <td>SDA</td>
+            <td>GPIO 21</td>
+          </tr>
+          <tr>
+            <td>SCL</td>
+            <td>GPIO 22</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="panel">
+        Current minimal firmware will not detect the DS3231 yet. After the hardware firmware is enabled, reboot and check Serial for <span class="ok">DS3231: ok</span>.
+      </div>
+    </section>
+
+    <section>
+      <h2>Step 3: ADS1115 Without Pressure Sensor</h2>
+      <p>Wire the ADS1115 on the same I2C bus. Do not connect the pressure sensor yet.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>ADS1115</th>
+            <th>ESP32</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>VDD</td>
+            <td>3V3 for initial I2C testing</td>
+          </tr>
+          <tr>
+            <td>GND</td>
+            <td>GND</td>
+          </tr>
+          <tr>
+            <td>SDA</td>
+            <td>GPIO 21</td>
+          </tr>
+          <tr>
+            <td>SCL</td>
+            <td>GPIO 22</td>
+          </tr>
+          <tr>
+            <td>ADDR</td>
+            <td>GND or module default</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="panel">
+        Current minimal firmware will not detect the ADS1115 yet. After the hardware firmware is enabled, reboot and check Serial for <span class="ok">ADS1115: ok</span>.
+      </div>
+    </section>
+
+    <section>
+      <h2>Step 4: microSD Module</h2>
+      <p>Use a FAT32-formatted card. Check your module label for whether VCC should be 3.3 V or 5 V.</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>microSD Module</th>
+            <th>ESP32</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>VCC</td>
+            <td>3V3 or 5V, depending on module</td>
+          </tr>
+          <tr>
+            <td>GND</td>
+            <td>GND</td>
+          </tr>
+          <tr>
+            <td>CS</td>
+            <td>GPIO 5</td>
+          </tr>
+          <tr>
+            <td>SCK</td>
+            <td>GPIO 18</td>
+          </tr>
+          <tr>
+            <td>MISO</td>
+            <td>GPIO 19</td>
+          </tr>
+          <tr>
+            <td>MOSI</td>
+            <td>GPIO 23</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="panel">
+        Current minimal firmware will not detect the SD card yet. After the hardware firmware is enabled, reboot and check Serial for <span class="ok">SD card: ok</span>.
+      </div>
+    </section>
+
+    <section>
+      <h2>Step 5: Pressure Sensor</h2>
+      <p>Pause before wiring the pressure sensor. Confirm the sensor supply voltage, wire colors, and ADS1115 power voltage first.</p>
+
+      <ul>
+        <li>Pressure sensor output goes to ADS1115 <code>A0</code>, not directly to the ESP32.</li>
+        <li>If ADS1115 is powered from 3.3 V, use a voltage divider so the 4.5 V maximum sensor output is reduced below 3.3 V.</li>
+        <li>If ADS1115 is powered from 5 V, use an I2C level shifter between the ADS1115 and ESP32.</li>
+      </ul>
+
+      <div class="panel">
+        Gather: pressure sensor model, wire colors, required supply voltage, ADS1115 board model, and intended ADS1115 VDD.
+      </div>
+    </section>
+
+    <section>
+      <h2>Useful URLs</h2>
+      <ul>
+        <li>Status page: <code>http://192.168.4.1</code></li>
+        <li>Status JSON: <code>http://192.168.4.1/status</code></li>
+        <li>CSV download, after hardware logging is enabled: <code>http://192.168.4.1/download</code></li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>
