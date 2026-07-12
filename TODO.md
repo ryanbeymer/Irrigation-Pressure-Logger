@@ -10,6 +10,14 @@
 - SSD1306 OLED is detected on I2C at `0x3C`.
 - OLED displays live logger values and updates.
 - Pressure sensor signal is readable through the ADS1115.
+- HW-125 microSD initializes on the SPI bus.
+- CSV rows (`timestamp,millis,pressure_psi,voltage`) append to `/pressure_log.csv` every ~2 s.
+  The `millis` column resets to ~0 on reboot, so a drop in it marks a device restart.
+- `http://192.168.4.1/download` returns the CSV log; `/resetlog` starts a fresh file.
+- DS3231 RTC detected on I2C at `0x68`; CSV timestamps are real date/time.
+- `/settime` (and the web "Sync clock" button) set the RTC from the browser's local time.
+- Live web dashboard at `http://192.168.4.1`: pressure gauge, chip-status pills, clock sync, JSON/CSV links.
+- Pressure calibrated for the 0-80 PSI sensor: zero anchored at 0.437 V, 20 PSI/V slope.
 
 ## Confirmed Wiring
 
@@ -48,6 +56,33 @@ Sensor black        -> ESP32 GND
 
 The firmware currently uses a divider scale of `11.0`.
 
+### microSD (HW-125, SPI)
+
+| HW-125 Pin | ESP32 Pin |
+| --- | --- |
+| CS | GPIO 5 |
+| SCK | GPIO 18 |
+| MOSI | GPIO 23 |
+| MISO | GPIO 19 |
+| VCC | ESP32 VIN (5V) |
+| GND | ESP32 GND |
+
+The HW-125's onboard regulator needs 5V — powering VCC from 3V3 fails to init. Card must be FAT32.
+
+### DS3231 RTC (HW-084, I2C)
+
+| HW-084 Pin | ESP32 Pin |
+| --- | --- |
+| VCC | ESP32 3V3 |
+| GND | ESP32 GND |
+| SDA | ESP32 GPIO 22 |
+| SCL | ESP32 GPIO 21 |
+| 32K / SQW / RST | not connected |
+
+Shares the I2C bus with the ADS1115 and OLED. Powered from 3V3 so the module's bus
+pull-ups stay at 3.3V. The onboard AT24C32 EEPROM also appears at `0x57`. Time is
+seeded from the firmware build clock only when the coin cell has lost power.
+
 ## Observed Readings
 
 - A0 tied to GND read about `0.0000 V`.
@@ -60,20 +95,26 @@ The firmware currently uses a divider scale of `11.0`.
 
 ## Next Steps
 
-1. Add and test microSD card support.
-2. Append CSV rows with voltage and PSI readings.
-3. Add `/download` for CSV export.
-4. Add DS3231 RTC support for real timestamps.
-5. Calibrate pressure once a real gauge or known pressure source is available.
-6. Clean up the firmware into modules after the hardware path is proven.
+1. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
+2. Clean up the firmware into modules after the hardware path is proven.
 
 ## Calibration Notes
 
-Nominal sensor calibration is still:
+Active sensor is the **0-80 PSI** unit (green signal / black GND / red 5 V), 0.5-4.5 V output.
 
 ```text
-0.5 V = 0 PSI
-4.5 V = 100 PSI
+0 PSI  = 0.437 V   (measured atmospheric idle; below the nominal 0.5 V)
+80 PSI = 4.437 V   (nominal 4.0 V / 20 PSI/V span)
 ```
 
-Do not finalize calibration until comparing against a real pressure gauge.
+Slope confirmed against a ~32 PSI reference. Zero is anchored to the measured idle so
+atmospheric reads exactly 0. A higher steady reference would refine the slope further.
+
+The 0-150 PSI ratiometric sensor that was trialed here was **DOA** — powered fine at 5 V
+but its output stayed frozen at 0.33 V under pressure. Returned/replaced.
+
+## Firmware Notes
+
+- Large HTML pages served from `handleRoot()` **must** be declared `static const char[]`.
+  A ~6 KB non-static local array is built on the loop task's stack and overflows it
+  (stack canary panic / reboot on every page load).

@@ -1,65 +1,66 @@
 # Irrigation Pressure Logger
 
-ESP32 PlatformIO firmware for an irrigation pressure logger. The current checked-in milestone is intentionally minimal: it boots, starts Serial, creates a local Wi-Fi access point, and serves a status page with hardware marked as stubbed.
+ESP32 (PlatformIO + Arduino) firmware for an irrigation pressure logger. It reads a
+0-80 PSI pressure transducer through an ADS1115 ADC, timestamps each reading with a
+DS3231 real-time clock, logs it to a microSD card as CSV, shows it on an OLED, and
+serves a live web dashboard over its own Wi-Fi access point.
 
-## Current Firmware Milestone
+## What it does
 
-- Starts Serial at 115200 baud.
-- Starts a Wi-Fi access point named `IrrigationLogger`.
-- Serves a local page at `http://192.168.4.1`.
-- Exposes `/status` with JSON showing AP information and `"hardware":"stubbed"`.
-- Does not initialize ADS1115, DS3231, SD, or the pressure sensor yet.
+- Samples the pressure sensor every ~2 seconds via the ADS1115.
+- Logs `timestamp,millis,pressure_psi,voltage` rows to `/pressure_log.csv` on microSD.
+- Keeps real wall-clock time with the DS3231 (battery-backed).
+- Hosts a Wi-Fi AP `IrrigationLogger` and serves a dashboard at `http://192.168.4.1`.
+- Shows live pressure, connection info, and log status on the SSD1306 OLED.
 
-This lets the ESP32, USB upload path, Serial monitor, Wi-Fi AP, and local web page be tested before wiring sensors.
+## Web endpoints (AP `IrrigationLogger`, `http://192.168.4.1`)
 
-## Planned Hardware
-
-- Board: ESP32 DevKit, PlatformIO board `esp32dev`
-- Pressure transducer: 0-100 PSI, 0.5-4.5 V analog output
-- ADC: ADS1115 over I2C
-- RTC: DS3231 over I2C
-- Storage: microSD module over SPI
-- Optional display: SSD1306 OLED over I2C, not used in the first firmware milestone
-- Power: 5 V USB
-
-## Planned Wiring
-
-These pins are reserved in `include/Config.h` for the hardware-enabled firmware milestone.
-
-| Device | ESP32 Pin |
+| Endpoint | Purpose |
 | --- | --- |
-| I2C SDA for ADS1115, DS3231, optional OLED | GPIO 21 |
-| I2C SCL for ADS1115, DS3231, optional OLED | GPIO 22 |
-| microSD CS | GPIO 5 |
-| microSD SCK | GPIO 18 |
-| microSD MISO | GPIO 19 |
-| microSD MOSI | GPIO 23 |
-| ADS1115 A0 | Pressure transducer analog output |
+| `/` | Live dashboard (pressure gauge, chip-status pills, clock sync, links) |
+| `/status` | JSON: pressure, voltages, chip status, logged rows, RTC timestamp |
+| `/download` | Download `pressure_log.csv` |
+| `/settime?epoch=<local-unix>` | Set the RTC (used by the dashboard "Sync clock" button) |
+| `/resetlog` | Erase the CSV and start a fresh file with the header |
 
-The pressure transducer calibration is:
+## Hardware
 
-- 0.5 V = 0 PSI
-- 4.5 V = 100 PSI
+- **Board:** ESP32 DevKit V1, PlatformIO board `esp32dev`
+- **Sensor:** 0-80 PSI transducer, 0.5-4.5 V output (green = signal, red = 5 V, black = GND)
+- **ADC:** ADS1115 over I2C (`0x48`)
+- **RTC:** DS3231 / HW-084 over I2C (`0x68`; onboard EEPROM at `0x57`)
+- **Storage:** HW-125 microSD module over SPI
+- **Display:** SSD1306 OLED over I2C (`0x3C`)
 
-## Planned Full Logger Behavior
+### Wiring
 
-- Initializes ADS1115, DS3231, and SD card.
-- Reads pressure every 5 minutes.
-- Appends CSV rows to `/pressure_log.csv`:
+| Signal | ESP32 pin |
+| --- | --- |
+| I2C SDA (ADS1115, DS3231, OLED) | GPIO 22 |
+| I2C SCL (ADS1115, DS3231, OLED) | GPIO 21 |
+| microSD CS / SCK / MISO / MOSI | GPIO 5 / 18 / 23 / 19 |
+| Sensor signal → 10k → ADS1115 A0, A0 → 1k → GND | divider scale 11.0 |
 
-```csv
-timestamp,pressure_psi,voltage
-```
+I2C modules (ADS1115, OLED, DS3231) are powered from **3V3**; the sensor and the HW-125
+microSD are powered from **VIN (5 V)**. See `TODO.md` for the full pin-by-pin wiring,
+observed readings, and calibration notes.
 
-- Exposes `/download` to download the CSV log.
-- Exposes `/status` with JSON containing current pressure, voltage, timestamp, SD status, RTC status, and ADC status.
+## Calibration
 
-The stub modules for that fuller version are still in the repo, but `platformio.ini` currently builds only `src/main.cpp`.
+The 0-80 PSI sensor idles at ~0.437 V (below the nominal 0.5 V), so zero is anchored to
+that measured value; the slope is the nominal 20 PSI/V, confirmed against a ~32 PSI
+reference. Constants live at the top of `src/main.cpp`.
 
-## Development Commands
+## Build layout
+
+`platformio.ini` builds **only `src/main.cpp`** (`build_src_filter = +<main.cpp>`); it is
+self-contained. The other files under `src/`/`include/` are unbuilt module stubs for a
+future refactor.
+
+## Development commands
 
 ```sh
-pio run
-pio run -t upload
-pio device monitor -b 115200
+pio run                        # Build
+pio run -t upload              # Build + flash over USB
+pio device monitor -b 115200   # Serial monitor
 ```

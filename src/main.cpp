@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
+#include <RTClib.h>
+#include <SD.h>
+#include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
@@ -10,13 +13,23 @@ constexpr uint8_t I2cSdaPin = 22;
 constexpr uint8_t I2cSclPin = 21;
 constexpr uint8_t Ads1115DefaultAddress = 0x48;
 constexpr uint8_t OledDefaultAddress = 0x3C;
+constexpr uint8_t Ds3231DefaultAddress = 0x68;
 constexpr int OledWidth = 128;
 constexpr int OledHeight = 64;
 constexpr unsigned long AdcReadIntervalMs = 2000;
 constexpr float DividerScale = 11.0f;
-constexpr float SensorZeroPsiVoltage = 0.5f;
-constexpr float SensorFullScaleVoltage = 4.5f;
-constexpr float SensorFullScalePsi = 100.0f;
+// Calibration for the 0-80 PSI, 0.5-4.5 V sensor (green/black/red). Zero is
+// anchored to the measured atmospheric output (0.437 V, vs nominal 0.5 V); the
+// nominal 4.0 V span (20 PSI/V) was confirmed by a ~32 PSI reference point.
+constexpr float SensorZeroPsiVoltage = 0.437f;
+constexpr float SensorFullScaleVoltage = 4.437f;
+constexpr float SensorFullScalePsi = 80.0f;
+
+// microSD over the ESP32 default VSPI bus (SCK 18, MISO 19, MOSI 23). Only CS
+// needs to be named; SD.begin(CS) uses those default SPI pins.
+constexpr uint8_t SdChipSelectPin = 5;
+constexpr const char *LogPath = "/pressure_log.csv";
+constexpr const char *CsvHeader = "timestamp,millis,pressure_psi,voltage";
 
 WebServer server(80);
 Adafruit_SSD1306 display(OledWidth, OledHeight, &Wire, -1);
@@ -29,6 +42,10 @@ float latestSensorVoltage = 0.0f;
 float latestPressurePsi = 0.0f;
 bool latestA0Valid = false;
 unsigned long lastAdcReadMs = 0;
+bool sdReady = false;
+unsigned long loggedRowCount = 0;
+RTC_DS3231 rtc;
+bool rtcReady = false;
 
 void scanI2cBus() {
   i2cDeviceList = "";
@@ -76,15 +93,32 @@ void updateDisplay() {
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
+
+  // Pressure is the headline value, rendered large at the top.
+  display.setTextSize(2);
   display.setCursor(0, 0);
-  display.println("Irrigation Logger");
-  display.println();
-  display.printf("ADS: %s\n", ads1115Detected ? "OK" : "NO");
-  display.printf("A0: %.4f V\n", latestA0Voltage);
-  display.printf("Sensor: %.3f V\n", latestSensorVoltage);
-  display.printf("PSI: %.1f\n", latestPressurePsi);
-  display.printf("AP: %s\n", WiFi.softAPIP().toString().c_str());
+  display.printf("%.1f PSI", latestPressurePsi);
+
+  // Connection info and logging status. Raw diagnostics (Sensor ADC status,
+  // A0 and sensor volts) live on the web page now.
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.printf("AP: %s", ApSsid);
+  display.setCursor(0, 30);
+  display.printf(" %s", WiFi.softAPIP().toString().c_str());
+  // Log sits with the timestamp at the bottom, a gap above it.
+  display.setCursor(0, 48);
+  display.printf("Log: %s (%lu)", sdReady ? "OK" : "NO", loggedRowCount);
+
+  display.setCursor(0, 56);
+  if (rtcReady) {
+    const DateTime now = rtc.now();
+    display.printf("%04d-%02d-%02d %02d:%02d",
+                   now.year(), now.month(), now.day(), now.hour(), now.minute());
+  } else {
+    display.print("Clock: not set");
+  }
+
   display.display();
 }
 
@@ -137,6 +171,80 @@ bool readAds1115A0(float &voltage) {
   return true;
 }
 
+String rtcTimestamp() {
+  if (!rtcReady) {
+    // Fall back to ms-since-boot so a missing RTC still yields a value.
+    return String(millis());
+  }
+
+  const DateTime now = rtc.now();
+  char buffer[20];
+  snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+           now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+  return String(buffer);
+}
+
+void beginRtc() {
+  if (!rtc.begin()) {
+    Serial.println("DS3231 not detected on I2C");
+    rtcReady = false;
+    return;
+  }
+
+  rtcReady = true;
+
+  // The DS3231 keeps time on its coin cell. Only (re)set the clock when it has
+  // actually lost power, using the firmware build time as the seed.
+  if (rtc.lostPower()) {
+    Serial.println("DS3231 lost power; setting time from build clock");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  Serial.printf("DS3231 initialized; time is %s\n", rtcTimestamp().c_str());
+}
+
+void beginSd() {
+  sdReady = SD.begin(SdChipSelectPin);
+  if (!sdReady) {
+    Serial.println("microSD init failed (card missing or wiring issue)");
+    return;
+  }
+
+  Serial.println("microSD initialized");
+
+  // Write the CSV header once, when the log file does not yet exist.
+  if (!SD.exists(LogPath)) {
+    File file = SD.open(LogPath, FILE_WRITE);
+    if (file) {
+      file.println(CsvHeader);
+      file.close();
+      Serial.printf("Created log file %s\n", LogPath);
+    } else {
+      Serial.printf("Failed to create log file %s\n", LogPath);
+    }
+  }
+}
+
+void appendLogRow() {
+  if (!sdReady || !latestA0Valid) {
+    return;
+  }
+
+  File file = SD.open(LogPath, FILE_APPEND);
+  if (!file) {
+    Serial.println("microSD append failed to open log file");
+    return;
+  }
+
+  // millis() is logged alongside the real timestamp: it resets to ~0 on every
+  // boot, so a drop in this column marks a device restart.
+  const String timestamp = rtcTimestamp();
+  file.printf("%s,%lu,%.1f,%.4f\n", timestamp.c_str(), millis(),
+              latestPressurePsi, latestSensorVoltage);
+  file.close();
+  loggedRowCount++;
+}
+
 void updateAdcReading() {
   float voltage = 0.0f;
   latestA0Valid = readAds1115A0(voltage);
@@ -157,33 +265,170 @@ void updateAdcReading() {
                   latestA0Voltage,
                   latestSensorVoltage,
                   latestPressurePsi);
+
+    appendLogRow();
   } else {
     Serial.println("ADS1115 A0: read failed");
   }
 }
 
 void handleRoot() {
-  const char page[] PROGMEM = R"HTML(
+  // 'static' keeps this ~6 KB page in flash. Without it the array is built on
+  // the loop task's stack, overflowing it and tripping the stack canary.
+  static const char page[] PROGMEM = R"HTML(
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Irrigation Logger Status</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 2rem; line-height: 1.45; }
-    main { max-width: 42rem; }
-    code { background: #f0f3f5; padding: 0.15rem 0.3rem; border-radius: 3px; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Irrigation Logger</title>
+<style>
+  :root{
+    --bg:#0e1517; --card:#16211f; --card2:#1b2825; --line:#26332f;
+    --ink:#e9f1ef; --muted:#8fa4a0; --accent:#2fb6a3;
+    --good:#46c06e; --bad:#e5565d;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);line-height:1.5;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:34rem;margin:0 auto;padding:1.25rem 1rem 3rem;}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;}
+  header h1{font-size:1.15rem;margin:0;}
+  .conn{display:flex;align-items:center;gap:.4rem;font-size:.8rem;color:var(--muted);}
+  .conn .dot{width:.6rem;height:.6rem;border-radius:50%;background:var(--bad);}
+  .conn.live .dot{background:var(--good);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:1.1rem 1.15rem;margin-bottom:1rem;}
+  .hero{text-align:center;padding:1.5rem 1.15rem;}
+  .psi{font-family:var(--mono);font-size:3.4rem;font-weight:700;line-height:1;letter-spacing:-.02em;}
+  .psi span{font-size:1.1rem;color:var(--muted);font-weight:600;margin-left:.35rem;}
+  .bar{height:.55rem;background:var(--card2);border-radius:100px;overflow:hidden;margin:1.1rem 0 .3rem;}
+  .bar>i{display:block;height:100%;width:0;border-radius:100px;
+    background:linear-gradient(90deg,var(--accent),#54d1c0);transition:width .4s ease;}
+  .scale{display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted);}
+  .subs{display:flex;gap:.75rem;margin-top:1.25rem;}
+  .subs>div{flex:1;background:var(--card2);border-radius:10px;padding:.6rem .7rem;}
+  .subs .k{font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+  .subs .v{font-family:var(--mono);font-size:1.05rem;font-weight:600;margin-top:.15rem;}
+  .pills{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;}
+  .pill{display:inline-flex;align-items:center;gap:.4rem;font-size:.8rem;font-weight:600;
+    padding:.35rem .7rem;border-radius:100px;background:var(--card2);border:1px solid var(--line);}
+  .pill .dot{width:.55rem;height:.55rem;border-radius:50%;background:var(--muted);}
+  .pill.on .dot{background:var(--good);} .pill.off .dot{background:var(--bad);}
+  .rows{margin-left:auto;font-size:.8rem;color:var(--muted);}
+  .rows b{color:var(--ink);font-family:var(--mono);}
+  h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:0 0 .8rem;}
+  table.clocks{border-collapse:collapse;width:100%;}
+  table.clocks td{padding:.35rem .2rem;}
+  table.clocks .lbl{color:var(--muted);text-align:right;white-space:nowrap;padding-right:.9rem;}
+  table.clocks .val{font-family:var(--mono);font-weight:700;font-size:1.1rem;}
+  button{font:inherit;font-weight:600;color:#04211d;background:var(--accent);border:0;
+    border-radius:9px;padding:.6rem 1rem;cursor:pointer;margin-top:.9rem;}
+  button:active{transform:translateY(1px);}
+  button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line);}
+  .msg{font-size:.8rem;color:var(--muted);margin-left:.6rem;}
+  .links{display:flex;gap:.6rem;}
+  .links a{flex:1;text-align:center;text-decoration:none;color:var(--ink);font-weight:600;
+    background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:.7rem;}
+  .links a:active{background:var(--line);}
+  footer{margin-top:1.5rem;text-align:center;font-size:.7rem;color:var(--muted);font-family:var(--mono);}
+</style>
 </head>
 <body>
-  <main>
+<div class="wrap">
+  <header>
     <h1>Irrigation Logger</h1>
-    <p>Status: booted and serving local Wi-Fi.</p>
-    <p>AP SSID: <code>IrrigationLogger</code></p>
-    <p>ADS1115 detection and A0 voltage are available in the JSON status endpoint.</p>
-    <p><a href="/status">View JSON status</a></p>
-  </main>
+    <span class="conn" id="conn"><span class="dot"></span><span id="conntxt">connecting</span></span>
+  </header>
+
+  <div class="card hero">
+    <div class="psi"><span id="psi">--</span><span>PSI</span></div>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="scale"><span>0</span><span>80 PSI</span></div>
+    <div class="subs">
+      <div><div class="k">Sensor</div><div class="v"><span id="sv">--</span> V</div></div>
+      <div><div class="k">Raw A0</div><div class="v"><span id="a0">--</span> V</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="pills">
+      <span class="pill" id="p-adc"><span class="dot"></span>Sensor ADC</span>
+      <span class="pill" id="p-oled"><span class="dot"></span>OLED</span>
+      <span class="pill" id="p-sd"><span class="dot"></span>Log</span>
+      <span class="pill" id="p-rtc"><span class="dot"></span>Clock</span>
+      <span class="rows">Rows: <b id="rows">--</b></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Clock</h2>
+    <table class="clocks">
+      <tr><td class="lbl">This device</td><td class="val" id="devtime">&mdash;</td></tr>
+      <tr><td class="lbl">Logger</td><td class="val" id="logtime">&mdash;</td></tr>
+    </table>
+    <button id="sync" type="button">Sync clock to this device</button>
+    <span class="msg" id="syncmsg"></span>
+  </div>
+
+  <div class="card">
+    <h2>Data</h2>
+    <div class="links">
+      <a href="/status">JSON</a>
+      <a href="/download">CSV</a>
+    </div>
+    <button class="ghost" id="newlog" type="button">Start new log</button>
+    <span class="msg" id="newlogmsg"></span>
+  </div>
+
+  <footer>IrrigationLogger &middot; 192.168.4.1</footer>
+</div>
+<script>
+  function pad(n){return String(n).padStart(2,"0");}
+  function fmt(d){return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+
+    pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());}
+  function setPill(id,on){document.getElementById(id).className="pill "+(on?"on":"off");}
+  function tickDevice(){document.getElementById("devtime").textContent=fmt(new Date());}
+
+  function apply(j){
+    document.getElementById("psi").textContent=Number(j.pressure_psi).toFixed(1);
+    document.getElementById("sv").textContent=Number(j.sensor_voltage).toFixed(3);
+    document.getElementById("a0").textContent=Number(j.ads1115_a0_voltage).toFixed(4);
+    var p=Math.max(0,Math.min(100,Number(j.pressure_psi)/80*100));
+    document.getElementById("bar").style.width=p+"%";
+    setPill("p-adc",j.ads1115_detected);
+    setPill("p-oled",j.oled_ready);
+    setPill("p-sd",j.sd_ready);
+    setPill("p-rtc",j.rtc_ready);
+    document.getElementById("rows").textContent=j.logged_rows;
+    document.getElementById("logtime").textContent=j.timestamp;
+    document.getElementById("conn").className="conn live";
+    document.getElementById("conntxt").textContent="live";
+  }
+  function refresh(){
+    fetch("/status").then(function(r){return r.json();}).then(apply)
+      .catch(function(){document.getElementById("conn").className="conn";
+        document.getElementById("conntxt").textContent="offline";});
+  }
+  document.getElementById("sync").addEventListener("click",function(){
+    var msg=document.getElementById("syncmsg");
+    var epoch=Math.floor(Date.now()/1000)-new Date().getTimezoneOffset()*60;
+    msg.textContent="Setting...";
+    fetch("/settime?epoch="+epoch).then(function(r){return r.text();})
+      .then(function(t){msg.textContent=t;refresh();})
+      .catch(function(e){msg.textContent="Error: "+e;});
+  });
+  document.getElementById("newlog").addEventListener("click",function(){
+    if(!confirm("Erase the CSV log and start a new one?"))return;
+    var msg=document.getElementById("newlogmsg");msg.textContent="Working...";
+    fetch("/resetlog").then(function(r){return r.text();})
+      .then(function(t){msg.textContent=t;refresh();})
+      .catch(function(e){msg.textContent="Error: "+e;});
+  });
+  tickDevice();setInterval(tickDevice,1000);
+  refresh();setInterval(refresh,2000);
+</script>
 </body>
 </html>
 )HTML";
@@ -205,8 +450,70 @@ void handleStatus() {
       "\"ads1115_a0_voltage\":" + String(latestA0Voltage, 4) + "," +
       "\"sensor_voltage\":" + String(latestSensorVoltage, 4) + "," +
       "\"pressure_psi\":" + String(latestPressurePsi, 1) + "," +
+      "\"sd_ready\":" + String(sdReady ? "true" : "false") + "," +
+      "\"log_path\":\"" + LogPath + "\"," +
+      "\"logged_rows\":" + String(loggedRowCount) + "," +
+      "\"rtc_ready\":" + String(rtcReady ? "true" : "false") + "," +
+      "\"timestamp\":\"" + rtcTimestamp() + "\"," +
       "\"pressure_sensor\":\"connected_via_10k_1k_divider\"}";
   server.send(200, "application/json", json);
+}
+
+void handleDownload() {
+  if (!sdReady) {
+    server.send(503, "text/plain", "microSD not ready");
+    return;
+  }
+
+  File file = SD.open(LogPath, FILE_READ);
+  if (!file) {
+    server.send(404, "text/plain", "No log file yet");
+    return;
+  }
+
+  server.sendHeader("Content-Disposition", "attachment; filename=pressure_log.csv");
+  server.streamFile(file, "text/csv");
+  file.close();
+}
+
+void handleSetTime() {
+  if (!rtcReady) {
+    server.send(503, "text/plain", "RTC not ready");
+    return;
+  }
+  if (!server.hasArg("epoch")) {
+    server.send(400, "text/plain", "missing epoch parameter");
+    return;
+  }
+
+  // The browser sends local wall-clock time as a Unix-style epoch (already
+  // shifted for the timezone), so the DS3231 stores local time directly.
+  const uint32_t epoch = strtoul(server.arg("epoch").c_str(), nullptr, 10);
+  rtc.adjust(DateTime(epoch));
+
+  Serial.printf("Clock set via /settime to %s\n", rtcTimestamp().c_str());
+  server.send(200, "text/plain", "Clock set to " + rtcTimestamp());
+}
+
+void handleResetLog() {
+  if (!sdReady) {
+    server.send(503, "text/plain", "microSD not ready");
+    return;
+  }
+
+  SD.remove(LogPath);
+  loggedRowCount = 0;
+
+  File file = SD.open(LogPath, FILE_WRITE);
+  if (!file) {
+    server.send(500, "text/plain", "Failed to recreate log file");
+    return;
+  }
+  file.println(CsvHeader);
+  file.close();
+
+  Serial.println("Log reset via /resetlog");
+  server.send(200, "text/plain", "New log started");
 }
 
 void setup() {
@@ -217,6 +524,8 @@ void setup() {
 
   Wire.begin(I2cSdaPin, I2cSclPin);
   scanI2cBus();
+  beginRtc();
+  beginSd();
   updateAdcReading();
 
   WiFi.mode(WIFI_AP);
@@ -225,6 +534,9 @@ void setup() {
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
+  server.on("/download", HTTP_GET, handleDownload);
+  server.on("/settime", HTTP_GET, handleSetTime);
+  server.on("/resetlog", HTTP_GET, handleResetLog);
   server.begin();
 
   Serial.printf("Wi-Fi AP started: %s\n", ApSsid);
