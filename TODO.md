@@ -18,6 +18,8 @@
 - `/settime` (and the web "Sync clock" button) set the RTC from the browser's local time.
 - Live web dashboard at `http://192.168.4.1`: pressure gauge, chip-status pills, clock sync, JSON/CSV links.
 - Pressure calibrated for the 0-80 PSI sensor: zero anchored at 0.437 V, 20 PSI/V slope.
+- Logging interval is web-adjustable (`/setinterval`, dashboard dropdown), saved to flash
+  (NVS) so it survives reboots/reflashes; sampling stays at 2 s, logging decoupled.
 
 ## Confirmed Wiring
 

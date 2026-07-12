@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
+#include <Preferences.h>
 #include <RTClib.h>
 #include <SD.h>
 #include <SPI.h>
@@ -17,6 +18,8 @@ constexpr uint8_t Ds3231DefaultAddress = 0x68;
 constexpr int OledWidth = 128;
 constexpr int OledHeight = 64;
 constexpr unsigned long AdcReadIntervalMs = 2000;
+constexpr unsigned long DefaultLogIntervalMs = 60000;  // 1 minute
+constexpr unsigned long MinLogIntervalMs = 2000;       // floor at the sample rate
 constexpr float DividerScale = 11.0f;
 // Calibration for the 0-80 PSI, 0.5-4.5 V sensor (green/black/red). Zero is
 // anchored to the measured atmospheric output (0.437 V, vs nominal 0.5 V); the
@@ -46,6 +49,9 @@ bool sdReady = false;
 unsigned long loggedRowCount = 0;
 RTC_DS3231 rtc;
 bool rtcReady = false;
+Preferences prefs;
+unsigned long logIntervalMs = DefaultLogIntervalMs;
+unsigned long lastLogMs = 0;
 
 void scanI2cBus() {
   i2cDeviceList = "";
@@ -265,8 +271,6 @@ void updateAdcReading() {
                   latestA0Voltage,
                   latestSensorVoltage,
                   latestPressurePsi);
-
-    appendLogRow();
   } else {
     Serial.println("ADS1115 A0: read failed");
   }
@@ -328,6 +332,9 @@ void handleRoot() {
   button:active{transform:translateY(1px);}
   button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line);}
   .msg{font-size:.8rem;color:var(--muted);margin-left:.6rem;}
+  .loglbl{font-size:.85rem;color:var(--muted);display:block;margin-bottom:.4rem;}
+  select{font:inherit;color:var(--ink);background:var(--card2);border:1px solid var(--line);
+    border-radius:9px;padding:.55rem .7rem;}
   .links{display:flex;gap:.6rem;}
   .links a{flex:1;text-align:center;text-decoration:none;color:var(--ink);font-weight:600;
     background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:.7rem;}
@@ -382,6 +389,20 @@ void handleRoot() {
     <span class="msg" id="newlogmsg"></span>
   </div>
 
+  <div class="card">
+    <h2>Logging</h2>
+    <label class="loglbl" for="loginterval">Save a reading to the log every</label>
+    <select id="loginterval">
+      <option value="2000">2 seconds</option>
+      <option value="10000">10 seconds</option>
+      <option value="30000">30 seconds</option>
+      <option value="60000">1 minute</option>
+      <option value="300000">5 minutes</option>
+      <option value="900000">15 minutes</option>
+    </select>
+    <span class="msg" id="intervalmsg"></span>
+  </div>
+
   <footer>IrrigationLogger &middot; 192.168.4.1</footer>
 </div>
 <script>
@@ -390,6 +411,7 @@ void handleRoot() {
     pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());}
   function setPill(id,on){document.getElementById(id).className="pill "+(on?"on":"off");}
   function tickDevice(){document.getElementById("devtime").textContent=fmt(new Date());}
+  var intervalLoaded=false;
 
   function apply(j){
     document.getElementById("psi").textContent=Number(j.pressure_psi).toFixed(1);
@@ -403,6 +425,11 @@ void handleRoot() {
     setPill("p-rtc",j.rtc_ready);
     document.getElementById("rows").textContent=j.logged_rows;
     document.getElementById("logtime").textContent=j.timestamp;
+    // Sync the dropdown to the saved interval once, so we don't fight the user.
+    if(!intervalLoaded && j.log_interval_ms){
+      document.getElementById("loginterval").value=String(j.log_interval_ms);
+      intervalLoaded=true;
+    }
     document.getElementById("conn").className="conn live";
     document.getElementById("conntxt").textContent="live";
   }
@@ -419,12 +446,31 @@ void handleRoot() {
       .then(function(t){msg.textContent=t;refresh();})
       .catch(function(e){msg.textContent="Error: "+e;});
   });
-  document.getElementById("newlog").addEventListener("click",function(){
-    if(!confirm("Erase the CSV log and start a new one?"))return;
-    var msg=document.getElementById("newlogmsg");msg.textContent="Working...";
-    fetch("/resetlog").then(function(r){return r.text();})
-      .then(function(t){msg.textContent=t;refresh();})
-      .catch(function(e){msg.textContent="Error: "+e;});
+  (function(){
+    var btn=document.getElementById("newlog");
+    var msg=document.getElementById("newlogmsg");
+    var armed=false, timer=null;
+    btn.addEventListener("click",function(){
+      // Two-tap confirm (no confirm() dialog; those are unreliable on mobile).
+      if(!armed){
+        armed=true;
+        btn.textContent="Tap again to erase";
+        msg.textContent="";
+        timer=setTimeout(function(){armed=false;btn.textContent="Start new log";},4000);
+        return;
+      }
+      clearTimeout(timer);armed=false;btn.textContent="Start new log";
+      msg.textContent="Working...";
+      fetch("/resetlog").then(function(r){return r.text();})
+        .then(function(t){msg.textContent=t;refresh();})
+        .catch(function(e){msg.textContent="Error: "+e;});
+    });
+  })();
+  document.getElementById("loginterval").addEventListener("change",function(e){
+    var msg=document.getElementById("intervalmsg");msg.textContent="Saving...";
+    fetch("/setinterval?ms="+e.target.value).then(function(r){return r.text();})
+      .then(function(){msg.textContent="Saved";})
+      .catch(function(err){msg.textContent="Error: "+err;});
   });
   tickDevice();setInterval(tickDevice,1000);
   refresh();setInterval(refresh,2000);
@@ -453,6 +499,7 @@ void handleStatus() {
       "\"sd_ready\":" + String(sdReady ? "true" : "false") + "," +
       "\"log_path\":\"" + LogPath + "\"," +
       "\"logged_rows\":" + String(loggedRowCount) + "," +
+      "\"log_interval_ms\":" + String(logIntervalMs) + "," +
       "\"rtc_ready\":" + String(rtcReady ? "true" : "false") + "," +
       "\"timestamp\":\"" + rtcTimestamp() + "\"," +
       "\"pressure_sensor\":\"connected_via_10k_1k_divider\"}";
@@ -516,11 +563,37 @@ void handleResetLog() {
   server.send(200, "text/plain", "New log started");
 }
 
+void handleSetInterval() {
+  if (!server.hasArg("ms")) {
+    server.send(400, "text/plain", "missing ms parameter");
+    return;
+  }
+
+  unsigned long ms = strtoul(server.arg("ms").c_str(), nullptr, 10);
+  if (ms < MinLogIntervalMs) {
+    ms = MinLogIntervalMs;
+  }
+
+  logIntervalMs = ms;
+  prefs.putULong("logMs", ms);  // persists across reboots and reflashes
+  lastLogMs = millis();
+
+  Serial.printf("Log interval set via /setinterval to %lu ms\n", logIntervalMs);
+  server.send(200, "text/plain", "Log interval set to " + String(logIntervalMs) + " ms");
+}
+
 void setup() {
   Serial.begin(SerialBaud);
   delay(100);
   Serial.println();
   Serial.println("Irrigation Logger minimal firmware starting");
+
+  prefs.begin("logger", false);
+  logIntervalMs = prefs.getULong("logMs", DefaultLogIntervalMs);
+  if (logIntervalMs < MinLogIntervalMs) {
+    logIntervalMs = MinLogIntervalMs;
+  }
+  Serial.printf("Log interval: %lu ms\n", logIntervalMs);
 
   Wire.begin(I2cSdaPin, I2cSclPin);
   scanI2cBus();
@@ -537,6 +610,7 @@ void setup() {
   server.on("/download", HTTP_GET, handleDownload);
   server.on("/settime", HTTP_GET, handleSetTime);
   server.on("/resetlog", HTTP_GET, handleResetLog);
+  server.on("/setinterval", HTTP_GET, handleSetInterval);
   server.begin();
 
   Serial.printf("Wi-Fi AP started: %s\n", ApSsid);
@@ -552,5 +626,12 @@ void loop() {
     lastAdcReadMs = now;
     updateAdcReading();
     updateDisplay();
+  }
+
+  // Logging runs on its own (web-adjustable) interval, independent of the
+  // faster sampling that keeps the display and dashboard responsive.
+  if (now - lastLogMs >= logIntervalMs) {
+    lastLogMs = now;
+    appendLogRow();
   }
 }

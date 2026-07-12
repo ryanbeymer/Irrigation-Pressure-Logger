@@ -8,7 +8,8 @@ serves a live web dashboard over its own Wi-Fi access point.
 ## What it does
 
 - Samples the pressure sensor every ~2 seconds via the ADS1115.
-- Logs `timestamp,millis,pressure_psi,voltage` rows to `/pressure_log.csv` on microSD.
+- Logs `timestamp,millis,pressure_psi,voltage` rows to `/pressure_log.csv` on microSD,
+  at a web-adjustable interval (saved to flash) while the display stays responsive.
 - Keeps real wall-clock time with the DS3231 (battery-backed).
 - Hosts a Wi-Fi AP `IrrigationLogger` and serves a dashboard at `http://192.168.4.1`.
 - Shows live pressure, connection info, and log status on the SSD1306 OLED.
@@ -22,6 +23,7 @@ serves a live web dashboard over its own Wi-Fi access point.
 | `/download` | Download `pressure_log.csv` |
 | `/settime?epoch=<local-unix>` | Set the RTC (used by the dashboard "Sync clock" button) |
 | `/resetlog` | Erase the CSV and start a fresh file with the header |
+| `/setinterval?ms=<n>` | Set how often a row is logged (persisted to flash) |
 
 ## Hardware
 
