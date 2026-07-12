@@ -44,8 +44,12 @@ serves a live web dashboard over its own Wi-Fi access point.
 | Sensor signal → 10k → ADS1115 A0, A0 → 1k → GND | divider scale 11.0 |
 
 I2C modules (ADS1115, OLED, DS3231) are powered from **3V3**; the sensor and the HW-125
-microSD are powered from **VIN (5 V)**. See `TODO.md` for the full pin-by-pin wiring,
-observed readings, and calibration notes.
+microSD are powered from **VIN (5 V)**.
+
+Full wiring references:
+- **`wiring-guide.html`** — pin-by-pin tables for every device, with a verification checklist.
+- **`wiring-diagram.html`** — color-coded visual of the board and all connections.
+- **`TODO.md`** — confirmed wiring, observed readings, and calibration notes.
 
 ## Calibration
 
