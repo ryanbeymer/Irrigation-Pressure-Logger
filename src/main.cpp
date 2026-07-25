@@ -209,6 +209,37 @@ void beginRtc() {
   Serial.printf("DS3231 initialized; time is %s\n", rtcTimestamp().c_str());
 }
 
+// Count the data rows already in the log file (total lines minus the header).
+// The CSV persists on the card but loggedRowCount resets on every boot, so this
+// lets the counter continue from where it left off instead of restarting at 0.
+unsigned long countExistingLogRows() {
+  File file = SD.open(LogPath, FILE_READ);
+  if (!file) {
+    return 0;
+  }
+
+  unsigned long lines = 0;
+  int lastByte = -1;
+  uint8_t buf[512];
+  int n;
+  while ((n = file.read(buf, sizeof(buf))) > 0) {
+    for (int i = 0; i < n; i++) {
+      if (buf[i] == '\n') {
+        lines++;
+      }
+      lastByte = buf[i];
+    }
+  }
+  // A final line with no trailing newline still counts as a row.
+  if (lastByte != -1 && lastByte != '\n') {
+    lines++;
+  }
+  file.close();
+
+  // Subtract the header line; guard against an empty or header-only file.
+  return lines > 1 ? lines - 1 : 0;
+}
+
 void beginSd() {
   sdReady = SD.begin(SdChipSelectPin);
   if (!sdReady) {
@@ -218,7 +249,9 @@ void beginSd() {
 
   Serial.println("microSD initialized");
 
-  // Write the CSV header once, when the log file does not yet exist.
+  // Write the CSV header once, when the log file does not yet exist. If it does
+  // exist, seed the row counter from the rows already on the card so a reboot
+  // continues the count instead of resetting to 0.
   if (!SD.exists(LogPath)) {
     File file = SD.open(LogPath, FILE_WRITE);
     if (file) {
@@ -228,6 +261,10 @@ void beginSd() {
     } else {
       Serial.printf("Failed to create log file %s\n", LogPath);
     }
+  } else {
+    loggedRowCount = countExistingLogRows();
+    Serial.printf("Existing log has %lu rows; continuing count from there\n",
+                  loggedRowCount);
   }
 }
 
