@@ -48,7 +48,6 @@ microSD are powered from **VIN (5 V)**.
 
 Full wiring references:
 - **`wiring-guide.html`** — pin-by-pin tables for every device, with a verification checklist.
-- **`wiring-diagram.html`** — color-coded visual of the board and all connections.
 - **`TODO.md`** — confirmed wiring, observed readings, and calibration notes.
 
 ## Calibration
