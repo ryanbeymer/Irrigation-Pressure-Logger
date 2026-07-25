@@ -1,0 +1,316 @@
+<title>Irrigation Pressure — Field Report</title>
+<style>
+  :root{
+    --bg:#0e1517; --card:#16211f; --card2:#1b2825; --line:#26332f;
+    --ink:#e9f1ef; --muted:#8fa4a0; --accent:#2fb6a3; --accent2:#54d1c0;
+    --good:#46c06e; --warn:#e0a83d; --bad:#e5565d;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#eef2f1;--card:#fff;--card2:#e9efed;--line:#d5dedb;
+      --ink:#16201e;--muted:#5c6b67;--accent:#0d8375;--accent2:#0d8375;}
+  }
+  :root[data-theme="light"]{--bg:#eef2f1;--card:#fff;--card2:#e9efed;--line:#d5dedb;
+    --ink:#16201e;--muted:#5c6b67;--accent:#0d8375;--accent2:#0d8375;}
+  :root[data-theme="dark"]{--bg:#0e1517;--card:#16211f;--card2:#1b2825;--line:#26332f;
+    --ink:#e9f1ef;--muted:#8fa4a0;--accent:#2fb6a3;--accent2:#54d1c0;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);line-height:1.5;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:60rem;margin:0 auto;padding:1.5rem 1rem 4rem;}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);margin:0 0 .4rem;}
+  h1{font-size:1.5rem;margin:0 0 .3rem;letter-spacing:-.01em;}
+  .sub{color:var(--muted);margin:0 0 1.5rem;font-size:.92rem;}
+  .grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));margin-bottom:1.25rem;}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:.9rem 1rem;}
+  .tile .k{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);}
+  .tile .v{font-family:var(--mono);font-size:1.7rem;font-weight:700;margin-top:.2rem;letter-spacing:-.01em;}
+  .tile .v small{font-size:.9rem;color:var(--muted);font-weight:600;}
+  .tile .note{font-size:.72rem;color:var(--muted);margin-top:.15rem;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1.1rem 1.2rem;margin-bottom:1.25rem;}
+  .card h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin:0 0 .9rem;}
+  .chartwrap{position:relative;width:100%;overflow-x:auto;}
+  canvas{display:block;width:100%;height:280px;}
+  .legend{display:flex;gap:1.2rem;flex-wrap:wrap;font-size:.76rem;color:var(--muted);margin-top:.6rem;}
+  .legend span{display:inline-flex;align-items:center;gap:.4rem;}
+  .swatch{width:1.6rem;height:0;border-top-width:2px;border-top-style:solid;}
+  .swatch.box{height:.8rem;width:1.1rem;border:1px solid var(--line);border-top-style:solid;}
+  ul.findings{list-style:none;margin:0;padding:0;display:grid;gap:.9rem;}
+  ul.findings li{display:grid;grid-template-columns:1.6rem 1fr;gap:.6rem;align-items:start;}
+  ul.findings .ic{font-size:1.1rem;line-height:1.3;}
+  ul.findings b{color:var(--ink);}
+  ul.findings .d{color:var(--muted);font-size:.9rem;}
+  .tag{font-family:var(--mono);font-size:.72rem;padding:.1rem .4rem;border-radius:4px;background:var(--card2);color:var(--accent);}
+  footer{color:var(--muted);font-size:.72rem;font-family:var(--mono);text-align:center;margin-top:1.5rem;}
+  /* dropzone */
+  .drop{border:1.5px dashed var(--line);border-radius:16px;background:var(--card);
+    padding:3rem 1.5rem;text-align:center;cursor:pointer;transition:border-color .15s,background .15s;}
+  .drop.over{border-color:var(--accent);background:var(--card2);}
+  .drop .ic{font-size:2.2rem;margin-bottom:.6rem;}
+  .drop p{margin:.2rem 0;}
+  .drop .hint{color:var(--muted);font-size:.85rem;}
+  .link{background:none;border:none;color:var(--accent);font:inherit;cursor:pointer;padding:0;text-decoration:underline;}
+  .err{color:var(--bad);font-size:.85rem;margin-top:.8rem;min-height:1.2em;}
+  .toolbar{display:flex;justify-content:flex-end;margin-bottom:.5rem;}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">Irrigation Logger · Field Data</p>
+  <h1>Pressure Report</h1>
+  <p class="sub" id="span">Drop a <span class="tag">pressure_log.csv</span> to build the report — data is parsed on your device and never uploaded.</p>
+
+  <div id="drop" class="drop">
+    <input type="file" id="file" accept=".csv,text/csv" hidden>
+    <div class="ic">📄⬇︎</div>
+    <p><b>Drop pressure_log.csv here</b></p>
+    <p class="hint">or <button type="button" id="browse" class="link">choose a file</button></p>
+    <p class="err" id="err"></p>
+  </div>
+
+  <div id="report" hidden>
+    <div class="toolbar"><button type="button" id="reset" class="link">↻ Load another CSV</button></div>
+
+    <div class="grid" id="tiles"></div>
+
+    <div class="card">
+      <h2>Pressure over time</h2>
+      <div class="chartwrap"><canvas id="chart"></canvas></div>
+      <div class="legend">
+        <span><i class="swatch" style="border-color:var(--accent2)"></i>Line pressure (PSI)</span>
+        <span><i class="swatch" style="border-color:var(--muted);border-top-style:dashed"></i>Charged-state mean</span>
+        <span><i class="swatch box" style="background:var(--card2)"></i>Logging gap (device off)</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>What the data shows</h2>
+      <ul class="findings" id="findings"></ul>
+    </div>
+
+    <footer id="foot"></footer>
+  </div>
+</div>
+
+<script>
+// ---------- helpers ----------
+const $ = id => document.getElementById(id);
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const avg = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0;
+const pstdev = a => { if(a.length<2) return 0; const m=avg(a); return Math.sqrt(avg(a.map(x=>(x-m)**2))); };
+const pctile = (sorted,p) => sorted.length ? sorted[Math.min(sorted.length-1, Math.floor(p/100*sorted.length))] : 0;
+
+function fmtShort(t){
+  const d=new Date(t*1000);
+  const hh=String(d.getHours()).padStart(2,"0"), mm=String(d.getMinutes()).padStart(2,"0");
+  return `${MON[d.getMonth()]} ${d.getDate()}, ${hh}:${mm}`;
+}
+function fmtDur(secs){
+  const h=secs/3600;
+  if(h>=48) return `${(h/24).toFixed(1)} days`;
+  if(h>=1.5) return `${h.toFixed(1)} h`;
+  return `${Math.round(secs/60)} min`;
+}
+
+// ---------- CSV -> rows ----------
+function parseCSV(text){
+  const lines = text.replace(/^﻿/,"").trim().split(/\r?\n/);
+  if(lines.length<2) throw new Error("file has no data rows");
+  const head = lines[0].split(",").map(s=>s.trim().toLowerCase());
+  const iT=head.indexOf("timestamp"), iM=head.indexOf("millis"), iP=head.indexOf("pressure_psi");
+  if(iT<0||iP<0) throw new Error("expected a header with timestamp and pressure_psi columns");
+  const rows=[];
+  for(let i=1;i<lines.length;i++){
+    const c=lines[i].split(",");
+    if(c.length<head.length) continue;
+    const t=Date.parse(c[iT].trim().replace(" ","T"));   // naive local time
+    const psi=parseFloat(c[iP]);
+    if(isNaN(t)||isNaN(psi)) continue;
+    rows.push({t:Math.floor(t/1000), ms: iM>=0?parseInt(c[iM],10):NaN, psi});
+  }
+  if(!rows.length) throw new Error("no rows could be parsed");
+  return rows;
+}
+
+// ---------- stats ----------
+function computeStats(rows){
+  const psi=rows.map(r=>r.psi);
+  const charged=rows.filter(r=>r.psi>=20).map(r=>r.psi);
+  const sorted=[...charged].sort((a,b)=>a-b);
+  // lowest charged excursion + when
+  let dip=null;
+  for(const r of rows){ if(r.psi>=20 && (!dip || r.psi<dip.val)) dip={val:r.psi,t:r.t}; }
+  // reboots (uptime counter reset) — only if millis present
+  const reboots=[];
+  for(let i=1;i<rows.length;i++) if(!isNaN(rows[i].ms)&&!isNaN(rows[i-1].ms)&&rows[i].ms<rows[i-1].ms) reboots.push(rows[i].t);
+  // gaps > 1h and per-step cadence
+  const gaps=[], iv=[];
+  for(let i=1;i<rows.length;i++){
+    const dt=rows[i].t-rows[i-1].t;
+    if(dt>3600) gaps.push({from:rows[i-1].t,to:rows[i].t,secs:dt});
+    else if(dt>0) iv.push(dt);
+  }
+  iv.sort((a,b)=>a-b);
+  return {
+    rows:rows.length, start:rows[0].t, end:rows[rows.length-1].t,
+    days:(rows[rows.length-1].t-rows[0].t)/86400,
+    mean:avg(charged), sd:pstdev(charged),
+    typLow:pctile(sorted,5), typHigh:pctile(sorted,95),
+    maxPsi:Math.max(...psi),
+    pctCharged:Math.round(100*charged.length/psi.length),
+    pctZero:Math.round(100*psi.filter(p=>p<1).length/psi.length),
+    dip, reboots, gaps, cadence: iv.length?iv[Math.floor(iv.length/2)]:0
+  };
+}
+
+// ---------- findings ----------
+function buildFindings(S){
+  const f=[];
+  if(S.mean>0){
+    f.push({ic:"✅",t:"Supply pressure while charged.",
+      d:`When pressurized the line averages <b>${S.mean.toFixed(1)} PSI</b> (±${S.sd.toFixed(1)} PSI). Typical range ${S.typLow.toFixed(0)}–${S.typHigh.toFixed(0)} PSI (5th–95th pct), peaking at ${S.maxPsi.toFixed(1)} PSI.`});
+  } else {
+    f.push({ic:"⚪",t:"No pressurized readings.",
+      d:`Every reading is below 20 PSI — the line was off or unpressurized for this whole log.`});
+  }
+  if(S.dip && S.mean>0 && S.dip.val < S.typLow-3){
+    f.push({ic:"📉",t:"Lowest pressure excursion.",
+      d:`Pressure dipped to <b>${S.dip.val.toFixed(1)} PSI</b> at ${fmtShort(S.dip.t)}, below the typical band. Worth checking whether that lines up with a zone running or peak demand.`});
+  }
+  if(S.gaps.length){
+    const items=S.gaps.slice().sort((a,b)=>b.secs-a.secs).slice(0,3)
+      .map(g=>`${fmtShort(g.from)} → ${fmtShort(g.to)} (${fmtDur(g.secs)})`).join("; ");
+    f.push({ic:"⏸️",t:`${S.gaps.length} logging gap${S.gaps.length>1?"s":""} (device off).`,
+      d:`No rows during: ${items}${S.gaps.length>3?"; …":""}. These are power-off periods, not pressure faults.`});
+  }
+  if(S.reboots.length){
+    f.push({ic:"🔌",t:`${S.reboots.length} reboot${S.reboots.length>1?"s":""}.`,
+      d:`Uptime counter reset at ${S.reboots.map(fmtShort).join(", ")}. Expected around power cycles; unexpected mid-run resets would point to a power issue.`});
+  }
+  if(S.cadence){
+    const per = S.cadence>=60 ? `${Math.round(S.cadence/60)} min` : `${S.cadence} s`;
+    f.push({ic:"🗓️",t:"Logging cadence.",
+      d:`Rows land about every ${per} (~${Math.round(86400/S.cadence).toLocaleString()}/day) while running.`});
+  }
+  f.push({ic:"💡",t:"Suggested next step.",
+    d:`Set a low-pressure threshold (e.g. <b>&lt; 45 PSI</b>) to flag events automatically, and keep the logger powered continuously for an unbroken baseline.`});
+  return f;
+}
+
+// ---------- render ----------
+let S, SERIES, GAP;
+function render(rows, name){
+  S=computeStats(rows);
+  SERIES=rows.map(r=>[r.t,r.psi]);
+  GAP=Math.max(1800, S.cadence*4);        // treat a >4x-cadence step as a break
+
+  $("drop").hidden=true; $("report").hidden=false;
+  $("span").innerHTML=`${S.rows.toLocaleString()} readings · ${fmtShort(S.start)} → ${fmtShort(S.end)} · ${S.days.toFixed(1)} days`;
+
+  const tiles=[
+    {k:"Charged pressure", v:S.mean.toFixed(1), u:"PSI", note:`± ${S.sd.toFixed(1)} stdev`},
+    {k:"Typical range", v:`${S.typLow.toFixed(0)}–${S.typHigh.toFixed(0)}`, u:"PSI", note:"5th–95th pct while charged"},
+    {k:"Time charged", v:S.pctCharged, u:"%", note:`${S.pctZero}% at zero (off)`},
+    {k:"Reboots", v:S.reboots.length, u:"", note:`${S.gaps.length} logging gap${S.gaps.length===1?"":"s"}`},
+  ];
+  $("tiles").innerHTML=tiles.map(t=>
+    `<div class="tile"><div class="k">${t.k}</div>
+     <div class="v">${t.v}<small> ${t.u}</small></div>
+     <div class="note">${t.note}</div></div>`).join("");
+
+  $("findings").innerHTML=buildFindings(S).map(f=>
+    `<li><span class="ic">${f.ic}</span><div><b>${f.t}</b><div class="d">${f.d}</div></div></li>`).join("");
+
+  $("foot").textContent=`${name} · parsed in-browser · nothing uploaded`;
+  draw();
+}
+
+// ---------- canvas line chart (breaks across gaps) ----------
+function draw(){
+  if(!SERIES) return;
+  const cv=$("chart"), dpr=window.devicePixelRatio||1;
+  const cssW=cv.clientWidth, cssH=280;
+  cv.width=cssW*dpr; cv.height=cssH*dpr;
+  const x=cv.getContext("2d"); x.scale(dpr,dpr);
+  const cs=getComputedStyle(document.documentElement);
+  const accent=cs.getPropertyValue("--accent2").trim()||"#54d1c0";
+  const muted=cs.getPropertyValue("--muted").trim()||"#8fa4a0";
+  const line=cs.getPropertyValue("--line").trim()||"#26332f";
+  const padL=38,padR=12,padT=12,padB=26, W=cssW, H=cssH;
+  const t0=SERIES[0][0], t1=SERIES[SERIES.length-1][0], span=Math.max(1,t1-t0);
+  const ymax=Math.max(80, Math.ceil(S.maxPsi/20)*20), ymin=0;
+  const px=t=> padL+(t-t0)/span*(W-padL-padR);
+  const py=v=> H-padB-(v-ymin)/(ymax-ymin)*(H-padT-padB);
+
+  x.clearRect(0,0,W,H);
+
+  // shaded gap bands
+  x.fillStyle=cs.getPropertyValue("--card2").trim()||"#1b2825";
+  for(const g of S.gaps) x.fillRect(px(g.from),padT,Math.max(1,px(g.to)-px(g.from)),H-padT-padB);
+
+  // grid + y labels
+  x.strokeStyle=line; x.fillStyle=muted; x.font="10px "+cs.getPropertyValue("--mono"); x.lineWidth=1;
+  for(let v=0; v<=ymax; v+=20){
+    x.beginPath(); x.moveTo(padL,py(v)); x.lineTo(W-padR,py(v)); x.stroke();
+    x.fillText(String(v), 6, py(v)+3);
+  }
+  // x labels on day change
+  let lastDay=null;
+  for(const [t,] of SERIES){
+    const d=new Date(t*1000), key=d.getMonth()+"-"+d.getDate();
+    if(key!==lastDay){ lastDay=key; x.fillText((d.getMonth()+1)+"/"+d.getDate(), px(t)-8, H-8); }
+  }
+  // charged mean dashed line
+  if(S.mean>0){
+    x.strokeStyle=muted; x.setLineDash([4,4]); x.lineWidth=1;
+    x.beginPath(); x.moveTo(padL,py(S.mean)); x.lineTo(W-padR,py(S.mean)); x.stroke();
+    x.setLineDash([]);
+  }
+  // split into gap-free segments
+  const segs=[]; let cur=[SERIES[0]];
+  for(let i=1;i<SERIES.length;i++){
+    if(SERIES[i][0]-SERIES[i-1][0] > GAP){ segs.push(cur); cur=[]; }
+    cur.push(SERIES[i]);
+  }
+  segs.push(cur);
+  // area + line per segment
+  const grad=x.createLinearGradient(0,padT,0,H-padB);
+  grad.addColorStop(0, accent+"55"); grad.addColorStop(1, accent+"00");
+  for(const seg of segs){
+    if(seg.length<1) continue;
+    x.beginPath(); x.moveTo(px(seg[0][0]),py(seg[0][1]));
+    for(const [t,v] of seg) x.lineTo(px(t),py(v));
+    x.lineTo(px(seg[seg.length-1][0]),H-padB); x.lineTo(px(seg[0][0]),H-padB); x.closePath();
+    x.fillStyle=grad; x.fill();
+    x.beginPath(); x.strokeStyle=accent; x.lineWidth=1.5; x.lineJoin="round";
+    seg.forEach(([t,v],i)=> i?x.lineTo(px(t),py(v)):x.moveTo(px(t),py(v)));
+    x.stroke();
+  }
+}
+
+// ---------- file input / drag + drop ----------
+function load(file){
+  $("err").textContent="";
+  const rd=new FileReader();
+  rd.onerror=()=>{ $("err").textContent="Could not read that file."; };
+  rd.onload=()=>{ try{ render(parseCSV(rd.result), file.name); }
+    catch(e){ $("err").textContent="Couldn't parse this CSV: "+e.message; } };
+  rd.readAsText(file);
+}
+$("browse").onclick=e=>{ e.stopPropagation(); $("file").click(); };
+$("drop").onclick=()=>$("file").click();
+$("file").onchange=e=>{ if(e.target.files[0]) load(e.target.files[0]); };
+$("reset").onclick=()=>{ $("report").hidden=true; $("drop").hidden=false; $("file").value=""; $("err").textContent=""; };
+
+const drop=$("drop");
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
+["dragleave","dragend"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
+drop.addEventListener("drop",e=>{ e.preventDefault(); drop.classList.remove("over");
+  const f=e.dataTransfer.files[0]; if(f) load(f); });
+// allow dropping anywhere while the dropzone is showing
+window.addEventListener("dragover",e=>e.preventDefault());
+window.addEventListener("drop",e=>{ e.preventDefault();
+  if($("report").hidden){ const f=e.dataTransfer.files[0]; if(f) load(f); } });
+
+addEventListener("resize", draw);
+new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+</script>
