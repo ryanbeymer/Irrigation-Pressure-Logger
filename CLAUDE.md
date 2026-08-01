@@ -4,17 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-ESP32 firmware (PlatformIO + Arduino framework) for an irrigation pressure logger. A 0-100 PSI / 0.5-4.5 V pressure transducer feeds an ADS1115 ADC over I2C; the ESP32 hosts a Wi-Fi access point serving a status page. An SSD1306 OLED shows live readings. DS3231 RTC and microSD logging are planned but not yet active.
+ESP32-S3 firmware (PlatformIO + Arduino framework) for an irrigation pressure logger, running on a **LilyGo T-SIM7080G-S3** board. A 0-80 PSI / 0.5-4.5 V pressure transducer feeds an ADS1115 ADC over I2C; the board hosts a Wi-Fi access point serving a live dashboard. An SSD1306 OLED shows live readings, and the CSV log is written to the board's onboard microSD slot. There is no hardware RTC — timestamps come from a software clock synced from the browser via `/settime` (see "Two parallel realities" below).
 
 ## Commands
 
 ```sh
 pio run                        # Build (compiles only src/main.cpp — see below)
 pio run -t upload              # Build + flash over USB
-pio device monitor -b 115200   # Serial monitor
+pio device monitor -b 115200   # Serial monitor (see caveat below)
 ```
 
-Board: `esp32dev`. No host-side test runner — validation is done on-device via the Serial monitor and the `/status` JSON endpoint.
+Board: `esp32-s3-devkitc-1` (generic S3 target; the LilyGo isn't in PlatformIO's board list, so pins are set explicitly in `main.cpp` rather than via board macros). No host-side test runner — validation is done on-device via the Serial monitor and the `/status` JSON endpoint.
+
+**`pio device monitor` needs a real TTY** and will fail with a `termios` error if run from a non-interactive shell (e.g. a backgrounded/piped command). In that case read the port directly instead, e.g. with a short Python `pyserial` script or `stty <port> 115200 && cat <port>`.
 
 ## Critical: only main.cpp is compiled
 
@@ -24,29 +26,34 @@ Board: `esp32dev`. No host-side test runner — validation is done on-device via
 
 ## Two parallel realities — do not conflate them
 
-There are meaningful discrepancies between the working firmware (`main.cpp`, matches the wired hardware) and the stub modules / `Config.h` (still reflect the original design assumptions). When changing anything, follow `main.cpp` + `TODO.md`, not the stubs:
+There are meaningful discrepancies between the working firmware (`main.cpp`, matches the wired hardware) and the stub modules / `Config.h` (still reflect an earlier ESP32 classic + external-module design). When changing anything, follow `main.cpp` + `TODO.md`, not the stubs:
 
 | Concern | Working (`main.cpp`, `TODO.md`) | Stubs / `Config.h` |
 | --- | --- | --- |
-| I2C SDA / SCL | GPIO **22 / 21** (physically confirmed) | GPIO 21 / 22 |
+| Chip | ESP32-**S3** (LilyGo T-SIM7080G-S3) | Classic ESP32 assumptions |
+| I2C SDA / SCL | GPIO **15 / 7** (board's shared I2C bus — also used by the onboard AXP2101 PMU) | GPIO 21 / 22 |
 | ADC read | Raw I2C register writes, LSB `0.000125 V`, `±4.096V` range | Adafruit_ADS1X15 lib, `GAIN_TWOTHIRDS` |
 | Voltage divider | Scale `11.0` (10k/1k divider on A0) | No divider |
 | Sample interval | 2 s (`AdcReadIntervalMs`) | 5 min (`SampleIntervalMs`) |
-| SD / RTC / CSV | Not present | Implemented in stubs |
+| microSD | Onboard slot via **SD_MMC** (1-bit mode, pins 38/39/40) — **not** SPI, **not** an external HW-125 module | Implemented in stubs (SPI-based) |
+| RTC | **None.** No hardware RTC on this board — `/settime` sets a software clock (epoch + `millis()` offset) that resets on reboot until re-synced | Implemented in stubs (assumes DS3231) |
 
-`lib_deps` currently lists only `Adafruit SSD1306`. Activating the stub modules would additionally require `Adafruit ADS1X15`, `RTClib`, and `ArduinoJson`, plus updating `build_src_filter`.
+Some ESP32-S3 GPIO numbers that matter if you touch pin assignments: **GPIO 22-25 don't exist** on the S3 (unlike classic ESP32), and **GPIO 19/20 are hardwired to the native USB D-/D+ lines** — reusing them for anything else breaks the USB serial connection. Both were hit while porting this firmware from the original classic-ESP32 DOIT DevKit board.
+
+`lib_deps` currently lists only `Adafruit SSD1306` (`SD_MMC` and `Preferences` are built into the ESP32 Arduino core, no separate dependency). Activating the stub modules would additionally require `Adafruit ADS1X15` and `ArduinoJson`, plus updating `build_src_filter`.
 
 ## Pressure calculation
 
-Nominal calibration (NOT yet verified against a real gauge — see `TODO.md`):
-- `sensor_voltage = adc_a0_voltage * 11.0` (undo the 10k/1k divider)
-- `psi = (sensor_voltage - 0.5) * (100 / (4.5 - 0.5))`, clamped at 0
+Calibrated for the 0-80 PSI sensor (zero anchored at 0.437 V idle, 20 PSI/V slope) — see `TODO.md` for the full calibration notes.
 
 ## HTTP endpoints (AP at `http://192.168.4.1`, SSID `IrrigationLogger`)
 
-- `GET /` — HTML status page
-- `GET /status` — JSON: AP info, I2C scan, ADS1115/OLED detection, A0 voltage, sensor voltage, PSI
-- `GET /download` — planned CSV export (only in the unbuilt `WebPortal` stub)
+- `GET /` — live HTML dashboard (pressure gauge, status pills, clock sync, log controls)
+- `GET /status` — JSON: AP info, I2C scan, ADS1115/OLED detection, A0/sensor voltage, PSI, SD + clock status, logged row count
+- `GET /download` — CSV export of the log file
+- `GET /settime?epoch=<unix seconds>` — sets the software clock (browser sends local wall-clock time, already timezone-shifted)
+- `GET /resetlog` — truncates the CSV log and restarts the row counter
+- `GET /setinterval?ms=<n>` — sets the logging interval (persisted to flash via `Preferences`)
 
 ## Where things stand
 

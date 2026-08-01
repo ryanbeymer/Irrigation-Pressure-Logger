@@ -1,20 +1,18 @@
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
-#include <RTClib.h>
-#include <SD.h>
-#include <SPI.h>
+#include <SD_MMC.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
 
 constexpr uint32_t SerialBaud = 115200;
 constexpr const char *ApSsid = "IrrigationLogger";
-constexpr uint8_t I2cSdaPin = 22;
-constexpr uint8_t I2cSclPin = 21;
+// LilyGo T-SIM7080G-S3: shared I2C bus (AXP2101 PMU, OLED, ADS1115).
+constexpr uint8_t I2cSdaPin = 15;
+constexpr uint8_t I2cSclPin = 7;
 constexpr uint8_t Ads1115DefaultAddress = 0x48;
 constexpr uint8_t OledDefaultAddress = 0x3C;
-constexpr uint8_t Ds3231DefaultAddress = 0x68;
 constexpr int OledWidth = 128;
 constexpr int OledHeight = 64;
 constexpr unsigned long AdcReadIntervalMs = 2000;
@@ -28,9 +26,11 @@ constexpr float SensorZeroPsiVoltage = 0.437f;
 constexpr float SensorFullScaleVoltage = 4.437f;
 constexpr float SensorFullScalePsi = 80.0f;
 
-// microSD over the ESP32 default VSPI bus (SCK 18, MISO 19, MOSI 23). Only CS
-// needs to be named; SD.begin(CS) uses those default SPI pins.
-constexpr uint8_t SdChipSelectPin = 5;
+// LilyGo T-SIM7080G-S3 onboard microSD slot, wired to the ESP32-S3's SDMMC
+// peripheral (1-bit mode) rather than SPI.
+constexpr int SdmmcClkPin = 38;
+constexpr int SdmmcCmdPin = 39;
+constexpr int SdmmcDataPin = 40;
 constexpr const char *LogPath = "/pressure_log.csv";
 constexpr const char *CsvHeader = "timestamp,millis,pressure_psi,voltage";
 
@@ -47,11 +47,17 @@ bool latestA0Valid = false;
 unsigned long lastAdcReadMs = 0;
 bool sdReady = false;
 unsigned long loggedRowCount = 0;
-RTC_DS3231 rtc;
-bool rtcReady = false;
+// Software clock: this board's PMU (AXP2101) has no calendar RTC, so the
+// clock is set from the browser via /settime and tracked against millis()
+// until the next reboot.
+bool clockSynced = false;
+time_t clockEpochAtSync = 0;
+unsigned long clockSyncMillis = 0;
 Preferences prefs;
 unsigned long logIntervalMs = DefaultLogIntervalMs;
 unsigned long lastLogMs = 0;
+
+String currentTimestamp();
 
 void scanI2cBus() {
   i2cDeviceList = "";
@@ -117,10 +123,8 @@ void updateDisplay() {
   display.printf("Log: %s (%lu)", sdReady ? "OK" : "NO", loggedRowCount);
 
   display.setCursor(0, 56);
-  if (rtcReady) {
-    const DateTime now = rtc.now();
-    display.printf("%04d-%02d-%02d %02d:%02d",
-                   now.year(), now.month(), now.day(), now.hour(), now.minute());
+  if (clockSynced) {
+    display.print(currentTimestamp());
   } else {
     display.print("Clock: not set");
   }
@@ -177,43 +181,30 @@ bool readAds1115A0(float &voltage) {
   return true;
 }
 
-String rtcTimestamp() {
-  if (!rtcReady) {
-    // Fall back to ms-since-boot so a missing RTC still yields a value.
+String currentTimestamp() {
+  if (!clockSynced) {
+    // Fall back to ms-since-boot so an unsynced clock still yields a value.
     return String(millis());
   }
 
-  const DateTime now = rtc.now();
+  // The browser sends local wall-clock time as a Unix-style epoch (already
+  // shifted for the timezone), so gmtime() renders it without an extra
+  // UTC conversion.
+  const time_t now = clockEpochAtSync + (millis() - clockSyncMillis) / 1000;
+  struct tm timeinfo;
+  gmtime_r(&now, &timeinfo);
   char buffer[20];
   snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
-           now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+           timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+           timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
   return String(buffer);
-}
-
-void beginRtc() {
-  if (!rtc.begin()) {
-    Serial.println("DS3231 not detected on I2C");
-    rtcReady = false;
-    return;
-  }
-
-  rtcReady = true;
-
-  // The DS3231 keeps time on its coin cell. Only (re)set the clock when it has
-  // actually lost power, using the firmware build time as the seed.
-  if (rtc.lostPower()) {
-    Serial.println("DS3231 lost power; setting time from build clock");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
-  Serial.printf("DS3231 initialized; time is %s\n", rtcTimestamp().c_str());
 }
 
 // Count the data rows already in the log file (total lines minus the header).
 // The CSV persists on the card but loggedRowCount resets on every boot, so this
 // lets the counter continue from where it left off instead of restarting at 0.
 unsigned long countExistingLogRows() {
-  File file = SD.open(LogPath, FILE_READ);
+  File file = SD_MMC.open(LogPath, FILE_READ);
   if (!file) {
     return 0;
   }
@@ -241,7 +232,8 @@ unsigned long countExistingLogRows() {
 }
 
 void beginSd() {
-  sdReady = SD.begin(SdChipSelectPin);
+  SD_MMC.setPins(SdmmcClkPin, SdmmcCmdPin, SdmmcDataPin);
+  sdReady = SD_MMC.begin("/sdcard", true);
   if (!sdReady) {
     Serial.println("microSD init failed (card missing or wiring issue)");
     return;
@@ -252,8 +244,8 @@ void beginSd() {
   // Write the CSV header once, when the log file does not yet exist. If it does
   // exist, seed the row counter from the rows already on the card so a reboot
   // continues the count instead of resetting to 0.
-  if (!SD.exists(LogPath)) {
-    File file = SD.open(LogPath, FILE_WRITE);
+  if (!SD_MMC.exists(LogPath)) {
+    File file = SD_MMC.open(LogPath, FILE_WRITE);
     if (file) {
       file.println(CsvHeader);
       file.close();
@@ -273,7 +265,7 @@ void appendLogRow() {
     return;
   }
 
-  File file = SD.open(LogPath, FILE_APPEND);
+  File file = SD_MMC.open(LogPath, FILE_APPEND);
   if (!file) {
     Serial.println("microSD append failed to open log file");
     return;
@@ -281,7 +273,7 @@ void appendLogRow() {
 
   // millis() is logged alongside the real timestamp: it resets to ~0 on every
   // boot, so a drop in this column marks a device restart.
-  const String timestamp = rtcTimestamp();
+  const String timestamp = currentTimestamp();
   file.printf("%s,%lu,%.1f,%.4f\n", timestamp.c_str(), millis(),
               latestPressurePsi, latestSensorVoltage);
   file.close();
@@ -537,8 +529,8 @@ void handleStatus() {
       "\"log_path\":\"" + LogPath + "\"," +
       "\"logged_rows\":" + String(loggedRowCount) + "," +
       "\"log_interval_ms\":" + String(logIntervalMs) + "," +
-      "\"rtc_ready\":" + String(rtcReady ? "true" : "false") + "," +
-      "\"timestamp\":\"" + rtcTimestamp() + "\"," +
+      "\"rtc_ready\":" + String(clockSynced ? "true" : "false") + "," +
+      "\"timestamp\":\"" + currentTimestamp() + "\"," +
       "\"pressure_sensor\":\"connected_via_10k_1k_divider\"}";
   server.send(200, "application/json", json);
 }
@@ -549,7 +541,7 @@ void handleDownload() {
     return;
   }
 
-  File file = SD.open(LogPath, FILE_READ);
+  File file = SD_MMC.open(LogPath, FILE_READ);
   if (!file) {
     server.send(404, "text/plain", "No log file yet");
     return;
@@ -561,22 +553,20 @@ void handleDownload() {
 }
 
 void handleSetTime() {
-  if (!rtcReady) {
-    server.send(503, "text/plain", "RTC not ready");
-    return;
-  }
   if (!server.hasArg("epoch")) {
     server.send(400, "text/plain", "missing epoch parameter");
     return;
   }
 
   // The browser sends local wall-clock time as a Unix-style epoch (already
-  // shifted for the timezone), so the DS3231 stores local time directly.
-  const uint32_t epoch = strtoul(server.arg("epoch").c_str(), nullptr, 10);
-  rtc.adjust(DateTime(epoch));
+  // shifted for the timezone); store it against millis() so we can keep
+  // advancing the clock in software until the next reboot.
+  clockEpochAtSync = strtoul(server.arg("epoch").c_str(), nullptr, 10);
+  clockSyncMillis = millis();
+  clockSynced = true;
 
-  Serial.printf("Clock set via /settime to %s\n", rtcTimestamp().c_str());
-  server.send(200, "text/plain", "Clock set to " + rtcTimestamp());
+  Serial.printf("Clock set via /settime to %s\n", currentTimestamp().c_str());
+  server.send(200, "text/plain", "Clock set to " + currentTimestamp());
 }
 
 void handleResetLog() {
@@ -585,10 +575,10 @@ void handleResetLog() {
     return;
   }
 
-  SD.remove(LogPath);
+  SD_MMC.remove(LogPath);
   loggedRowCount = 0;
 
-  File file = SD.open(LogPath, FILE_WRITE);
+  File file = SD_MMC.open(LogPath, FILE_WRITE);
   if (!file) {
     server.send(500, "text/plain", "Failed to recreate log file");
     return;
@@ -634,7 +624,6 @@ void setup() {
 
   Wire.begin(I2cSdaPin, I2cSclPin);
   scanI2cBus();
-  beginRtc();
   beginSd();
   updateAdcReading();
 

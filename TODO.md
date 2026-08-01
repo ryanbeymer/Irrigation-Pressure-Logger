@@ -1,23 +1,44 @@
 # Irrigation Logger Progress
 
+## Board: LilyGo T-SIM7080G-S3
+
+The project moved from a classic-ESP32 DOIT DevKit to a **LilyGo T-SIM7080G-S3**
+(ESP32-S3, onboard AXP2101 PMU, onboard microSD slot, SIM7080G modem — modem/PMU
+unused by this firmware so far). This replaces the old board entirely; the wiring
+facts below are for the new board only.
+
+Porting from the DOIT DevKit surfaced two ESP32-S3 gotchas worth remembering:
+- **GPIO 22-25 don't exist** on the S3 (unlike classic ESP32's continuous GPIO range).
+  The old firmware's `Wire.begin(22, 21)` failed with `sda gpio number error`, which
+  left the I2C driver in a broken state and hung the first bus-scan transaction
+  forever — looked like a boot hang, wasn't actually one.
+- **GPIO 19/20 are hardwired to the native USB D-/D+ lines.** Reusing them (e.g. for
+  SPI) breaks the USB serial connection itself.
+
+`platformio.ini` targets `board = esp32-s3-devkitc-1` (closest generic match; the
+LilyGo isn't in PlatformIO's board list) with `board_upload.flash_size = 16MB` and
+`-DARDUINO_USB_MODE=1 -DARDUINO_USB_CDC_ON_BOOT=1` so Serial works over the same
+USB port used for flashing.
+
 ## Current Working Checkpoint
 
-- ESP32 boots and starts Serial at 115200 baud.
+- ESP32-S3 boots and starts Serial (USB CDC) at 115200 baud.
 - Wi-Fi access point starts as `IrrigationLogger`.
 - Local status page is available at `http://192.168.4.1`.
 - JSON status is available at `http://192.168.4.1/status`.
-- ADS1115 is detected on I2C at `0x48`.
-- SSD1306 OLED is detected on I2C at `0x3C`.
-- OLED displays live logger values and updates.
-- Pressure sensor signal is readable through the ADS1115.
-- HW-125 microSD initializes on the SPI bus.
+- I2C bus scan runs cleanly on GPIO 15 (SDA) / GPIO 7 (SCL) — no ADS1115/OLED
+  wired to the new board yet, so both report "not detected" until that's done.
+- Onboard microSD (SD_MMC, 1-bit mode) initializes.
 - CSV rows (`timestamp,millis,pressure_psi,voltage`) append to `/pressure_log.csv` every ~2 s.
   The `millis` column resets to ~0 on reboot, so a drop in it marks a device restart.
 - `http://192.168.4.1/download` returns the CSV log; `/resetlog` starts a fresh file.
-- DS3231 RTC detected on I2C at `0x68`; CSV timestamps are real date/time.
-- `/settime` (and the web "Sync clock" button) set the RTC from the browser's local time.
+- No hardware RTC on this board (the AXP2101 PMU has no calendar/date-time registers,
+  only a battery-backed power rail). `/settime` (and the web "Sync clock" button) set
+  a **software clock** — an epoch captured against `millis()` — instead. It resets to
+  ms-since-boot on every reboot until re-synced from the browser.
 - Live web dashboard at `http://192.168.4.1`: pressure gauge, chip-status pills, clock sync, JSON/CSV links.
-- Pressure calibrated for the 0-80 PSI sensor: zero anchored at 0.437 V, 20 PSI/V slope.
+- Pressure calibrated for the 0-80 PSI sensor: zero anchored at 0.437 V, 20 PSI/V slope
+  (calibration itself is unchanged by the board swap — same sensor, same divider math).
 - Logging interval is web-adjustable (`/setinterval`, dashboard dropdown), saved to flash
   (NVS) so it survives reboots/reflashes; sampling stays at 2 s, logging decoupled.
 
@@ -25,65 +46,55 @@
 
 ### I2C Bus
 
-The ESP32 board labeling required the I2C pins swapped from the original assumption:
+Fixed pins on this board (shared with the onboard AXP2101 PMU — do not reassign):
 
-| Device Pin | ESP32 Pin |
+| Device Pin | ESP32-S3 Pin |
 | --- | --- |
-| ADS1115 SDA | GPIO 22 |
-| ADS1115 SCL | GPIO 21 |
-| OLED SDA | GPIO 22 |
-| OLED SCL | GPIO 21 |
+| ADS1115 SDA | GPIO 15 |
+| ADS1115 SCL | GPIO 7 |
+| OLED SDA | GPIO 15 |
+| OLED SCL | GPIO 7 |
+
+**Not yet physically wired** — OLED and ADS1115 still need to be connected to this bus.
 
 ### ADS1115
 
 | ADS1115 Pin | Connection |
 | --- | --- |
-| VDD/VCC | ESP32 3V3 |
-| GND | ESP32 GND |
-| SDA | ESP32 GPIO 22 |
-| SCL | ESP32 GPIO 21 |
+| VDD/VCC | 3V3 |
+| GND | GND |
+| SDA | GPIO 15 |
+| SCL | GPIO 7 |
 | ADDR | GND |
 | A0 | Pressure sensor divider output |
 
 ### Pressure Sensor Divider
 
-Current resistor values:
+Same divider as before (sensor-to-ADS1115 wiring is independent of the host board):
 
 ```text
 Sensor green signal -> 10k resistor -> ADS1115 A0
 ADS1115 A0          -> 1k resistor  -> GND
-Sensor red          -> ESP32 5V/VIN
-Sensor black        -> ESP32 GND
+Sensor red          -> 5V rail
+Sensor black        -> GND
 ```
 
-The firmware currently uses a divider scale of `11.0`.
+The firmware currently uses a divider scale of `11.0`. **Unconfirmed:** which physical
+pin on the LilyGo board supplies 5V for the sensor's red wire — needs to be checked
+against the board's silkscreen/schematic when wiring it up.
 
-### microSD (HW-125, SPI)
+### microSD (onboard, SD_MMC)
 
-| HW-125 Pin | ESP32 Pin |
+Built into the board — no external module. Uses the ESP32-S3 SDMMC peripheral in
+1-bit mode (not SPI):
+
+| Signal | ESP32-S3 Pin |
 | --- | --- |
-| CS | GPIO 5 |
-| SCK | GPIO 18 |
-| MOSI | GPIO 23 |
-| MISO | GPIO 19 |
-| VCC | ESP32 VIN (5V) |
-| GND | ESP32 GND |
+| CLK | GPIO 38 |
+| CMD | GPIO 39 |
+| DATA (D0) | GPIO 40 |
 
-The HW-125's onboard regulator needs 5V — powering VCC from 3V3 fails to init. Card must be FAT32.
-
-### DS3231 RTC (HW-084, I2C)
-
-| HW-084 Pin | ESP32 Pin |
-| --- | --- |
-| VCC | ESP32 3V3 |
-| GND | ESP32 GND |
-| SDA | ESP32 GPIO 22 |
-| SCL | ESP32 GPIO 21 |
-| 32K / SQW / RST | not connected |
-
-Shares the I2C bus with the ADS1115 and OLED. Powered from 3V3 so the module's bus
-pull-ups stay at 3.3V. The onboard AT24C32 EEPROM also appears at `0x57`. Time is
-seeded from the firmware build clock only when the coin cell has lost power.
+Card must be FAT32.
 
 ## Observed Readings
 
@@ -97,8 +108,14 @@ seeded from the firmware build clock only when the coin cell has lost power.
 
 ## Next Steps
 
-1. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
-2. Clean up the firmware into modules after the hardware path is proven.
+1. Wire the OLED and ADS1115 (with pressure sensor) to the new board's I2C bus
+   (GPIO 15 SDA / GPIO 7 SCL) and confirm both are detected in the `/status` scan.
+2. Confirm the 5V supply pin for the pressure sensor's red wire on this board.
+3. Insert a FAT32 microSD card and confirm `/download` returns real logged rows.
+4. Confirm the `IrrigationLogger` AP is actually visible over the air from a phone/
+   laptop (only checked via serial log + an inconclusive automated Wi-Fi scan so far).
+5. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
+6. Clean up the firmware into modules after the hardware path is proven.
 
 ## Calibration Notes
 
