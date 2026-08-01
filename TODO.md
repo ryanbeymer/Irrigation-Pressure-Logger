@@ -44,19 +44,16 @@ USB port used for flashing.
   to the AP auto-opens iOS's Captive Network Assistant (CNA) straight to the dashboard.
 - The CNA window is a locked-down mini-browser — confirmed on-device that a
   `target="_blank"` link (the usual escape trick for captive portals) does **nothing**
-  in it; iOS blocks it from opening Safari. Two ways out are offered on the dashboard:
-  - An email-gated "Continue" form (`/captive-login`), the same pattern real
-    hotel/airport portals use. Submitting it just sets `captivePortalUnlocked = true`
-    server-side; the actual dismissal happens on the OS's *next* background
-    captive-check probe (`/hotspot-detect.html`, `/generate_204`, etc. — matched by
-    path only), which now gets served the literal "you're online" response each OS
-    expects instead of the dashboard, so it auto-closes the captive window a few
-    seconds later. Re-armed per newly-connected station (`onApStationConnected`) so
-    a second phone gets its own prompt instead of inheriting the first one's state.
-  - A "Copy address" fallback (Clipboard API, falling back to `execCommand("copy")`)
-    for manually backing out of the CNA window and pasting into Safari.
-  Neither path is verified on a real device yet (see Next Steps) — worth confirming
-  the email-form path actually dismisses CNA within a few seconds as expected.
+  in it; iOS blocks it from opening Safari. An earlier attempt used an email-gated
+  form to trigger a real dismissal via the OS's background captive-check probes, but
+  that added real complexity (server-side unlock state, per-client re-arming, probe
+  handlers for each OS) for a payoff that was never confirmed to actually work — kept
+  it minimal instead: a small IP chip in the header (next to the title/connection
+  status) copies `http://192.168.4.1` to the clipboard (Clipboard API, falling back
+  to `execCommand("copy")`), so the user can back out of the CNA window (its own
+  Done/Cancel) and paste the address into Safari themselves. Not yet verified on a
+  real device that the clipboard copy itself works inside the CNA window (see Next
+  Steps).
 - Local status page is available at `http://192.168.4.1`.
 - JSON status is available at `http://192.168.4.1/status`.
 - I2C bus scan runs cleanly on GPIO 15 (SDA) / GPIO 7 (SCL) — no ADS1115/OLED
@@ -145,10 +142,9 @@ Card must be FAT32.
    (GPIO 15 SDA / GPIO 7 SCL) and confirm both are detected in the `/status` scan.
 2. Confirm the 5V supply pin for the pressure sensor's red wire on this board.
 3. Insert a FAT32 microSD card and confirm `/download` returns real logged rows.
-4. Verify the captive-portal "Continue" email form actually dismisses iOS's Captive
-   Network Assistant within a few seconds of submitting (i.e. the
-   `/captive-login` -> `captivePortalUnlocked` -> probe-response mechanism really
-   works end-to-end), and that the "Copy address" fallback works if it doesn't.
+4. Verify the header's IP chip actually copies to the clipboard from inside iOS's
+   Captive Network Assistant (that restricted webview may block the Clipboard API
+   too, the same way it blocks `target="_blank"` — untested).
 5. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
 6. Clean up the firmware into modules after the hardware path is proven.
 
