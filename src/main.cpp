@@ -2,12 +2,15 @@
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
 #include <SD_MMC.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <Wire.h>
 
 constexpr uint32_t SerialBaud = 115200;
-constexpr const char *ApSsid = "IrrigationLogger";
+// The broadcast SSID gets a "-<last 6 MAC hex chars>" suffix (set in setup())
+// so multiple loggers can be told apart on the same site.
+constexpr const char *ApSsidPrefix = "IrrigationLogger";
 // LilyGo T-SIM7080G-S3: shared I2C bus (AXP2101 PMU, OLED, ADS1115).
 constexpr uint8_t I2cSdaPin = 15;
 constexpr uint8_t I2cSclPin = 7;
@@ -36,6 +39,7 @@ constexpr const char *CsvHeader = "timestamp,millis,pressure_psi,voltage";
 
 WebServer server(80);
 Adafruit_SSD1306 display(OledWidth, OledHeight, &Wire, -1);
+String apSsid = ApSsidPrefix;  // finalized in setup() once the MAC is known
 String i2cDeviceList = "none";
 bool ads1115Detected = false;
 bool oledDetected = false;
@@ -115,7 +119,7 @@ void updateDisplay() {
   // A0 and sensor volts) live on the web page now.
   display.setTextSize(1);
   display.setCursor(0, 20);
-  display.printf("AP: %s", ApSsid);
+  display.printf("AP: %s", apSsid.c_str());
   display.setCursor(0, 30);
   display.printf(" %s", WiFi.softAPIP().toString().c_str());
   // Log sits with the timestamp at the bottom, a gap above it.
@@ -432,6 +436,14 @@ void handleRoot() {
     <span class="msg" id="intervalmsg"></span>
   </div>
 
+  <div class="card">
+    <h2>Firmware Update</h2>
+    <input type="file" id="fwfile" accept=".bin">
+    <div class="bar" id="fwbarwrap" style="display:none;margin:.7rem 0 .3rem;"><i id="fwbar"></i></div>
+    <button class="ghost" id="fwupload" type="button" disabled>Upload &amp; flash</button>
+    <span class="msg" id="fwmsg"></span>
+  </div>
+
   <footer>IrrigationLogger &middot; 192.168.4.1</footer>
 </div>
 <script>
@@ -501,6 +513,68 @@ void handleRoot() {
       .then(function(){msg.textContent="Saved";})
       .catch(function(err){msg.textContent="Error: "+err;});
   });
+  (function(){
+    var fileInput=document.getElementById("fwfile");
+    var btn=document.getElementById("fwupload");
+    var msg=document.getElementById("fwmsg");
+    var barWrap=document.getElementById("fwbarwrap");
+    var bar=document.getElementById("fwbar");
+    var armed=false, timer=null;
+
+    fileInput.addEventListener("change",function(){
+      armed=false;
+      btn.textContent="Upload & flash";
+      btn.disabled=!fileInput.files.length;
+      msg.textContent="";
+    });
+
+    btn.addEventListener("click",function(){
+      if(!fileInput.files.length){return;}
+      // Two-tap confirm (no confirm() dialog; those are unreliable on mobile).
+      // A bad file here means reflashing over USB to recover, so this gets
+      // the same friction as the log-erase button.
+      if(!armed){
+        armed=true;
+        btn.textContent="Tap again to flash";
+        timer=setTimeout(function(){armed=false;btn.textContent="Upload & flash";},4000);
+        return;
+      }
+      clearTimeout(timer);armed=false;btn.textContent="Upload & flash";
+
+      var file=fileInput.files[0];
+      var data=new FormData();
+      data.append("firmware",file,file.name);
+
+      var xhr=new XMLHttpRequest();
+      xhr.open("POST","/update");
+      barWrap.style.display="block";
+      bar.style.width="0%";
+      btn.disabled=true;
+      fileInput.disabled=true;
+      msg.textContent="Uploading...";
+
+      xhr.upload.addEventListener("progress",function(e){
+        if(e.lengthComputable){
+          bar.style.width=Math.round(e.loaded/e.total*100)+"%";
+        }
+      });
+      xhr.addEventListener("load",function(){
+        if(xhr.status===200){
+          msg.textContent="Flashed. Rebooting...";
+          document.getElementById("conn").className="conn";
+          document.getElementById("conntxt").textContent="rebooting";
+        }else{
+          msg.textContent="Error: "+xhr.responseText;
+          btn.disabled=false;fileInput.disabled=false;
+        }
+      });
+      xhr.addEventListener("error",function(){
+        msg.textContent="Upload failed (connection lost)";
+        btn.disabled=false;fileInput.disabled=false;
+      });
+      xhr.send(data);
+    });
+  })();
   tickDevice();setInterval(tickDevice,1000);
   refresh();setInterval(refresh,2000);
 </script>
@@ -513,7 +587,7 @@ void handleRoot() {
 void handleStatus() {
   const String json =
       String("{\"status\":\"ok\",") +
-      "\"ap_ssid\":\"" + ApSsid + "\"," +
+      "\"ap_ssid\":\"" + apSsid + "\"," +
       "\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"," +
       "\"i2c_sda\":" + String(I2cSdaPin) + "," +
       "\"i2c_scl\":" + String(I2cSclPin) + "," +
@@ -609,6 +683,48 @@ void handleSetInterval() {
   server.send(200, "text/plain", "Log interval set to " + String(logIntervalMs) + " ms");
 }
 
+// Streams the uploaded .bin into the inactive OTA partition as it arrives.
+// The actual HTTP response is sent afterward, from handleUpdateResult().
+void handleUpdateUpload() {
+  HTTPUpload &upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("OTA update starting: %s\n", upload.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("OTA update complete: %u bytes\n", upload.totalSize);
+    } else {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    Update.end();
+    Serial.println("OTA update aborted");
+  }
+}
+
+// Sends the final result once the upload (handled above) has finished, then
+// reboots into the new firmware on success.
+void handleUpdateResult() {
+  if (Update.hasError()) {
+    String message = "Update failed: ";
+    message += Update.errorString();
+    server.send(500, "text/plain", message);
+    return;
+  }
+
+  server.sendHeader("Connection", "close");
+  server.send(200, "text/plain", "Update OK, rebooting...");
+  delay(500);
+  ESP.restart();
+}
+
 void setup() {
   Serial.begin(SerialBaud);
   delay(100);
@@ -628,7 +744,15 @@ void setup() {
   updateAdcReading();
 
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(ApSsid);
+
+  // Suffix the SSID with the last 6 hex chars of this board's AP MAC so
+  // multiple loggers on the same site can be told apart.
+  String mac = WiFi.softAPmacAddress();
+  mac.replace(":", "");
+  String macSuffix = mac.substring(mac.length() - 6);
+  apSsid = String(ApSsidPrefix) + "-" + macSuffix;
+
+  WiFi.softAP(apSsid.c_str());
   beginDisplay();
 
   server.on("/", HTTP_GET, handleRoot);
@@ -637,9 +761,11 @@ void setup() {
   server.on("/settime", HTTP_GET, handleSetTime);
   server.on("/resetlog", HTTP_GET, handleResetLog);
   server.on("/setinterval", HTTP_GET, handleSetInterval);
+  server.on("/update", HTTP_POST, handleUpdateResult, handleUpdateUpload);
   server.begin();
 
-  Serial.printf("Wi-Fi AP started: %s\n", ApSsid);
+  Serial.printf("Wi-Fi AP started: %s\n", apSsid.c_str());
+  Serial.printf("Board MAC: %s\n", mac.c_str());
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
   Serial.println("Open http://192.168.4.1");
 }

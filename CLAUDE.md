@@ -46,7 +46,11 @@ Some ESP32-S3 GPIO numbers that matter if you touch pin assignments: **GPIO 22-2
 
 Calibrated for the 0-80 PSI sensor (zero anchored at 0.437 V idle, 20 PSI/V slope) — see `TODO.md` for the full calibration notes.
 
-## HTTP endpoints (AP at `http://192.168.4.1`, SSID `IrrigationLogger`)
+## HTTP endpoints (AP at `http://192.168.4.1`, SSID `IrrigationLogger-<last 6 MAC hex chars>`)
+
+The SSID gets a per-board suffix (e.g. `IrrigationLogger-1B1FEC`) computed from the AP
+MAC in `setup()`, so multiple loggers on the same site can be told apart. `/status`
+reports the full `ap_ssid` string.
 
 - `GET /` — live HTML dashboard (pressure gauge, status pills, clock sync, log controls)
 - `GET /status` — JSON: AP info, I2C scan, ADS1115/OLED detection, A0/sensor voltage, PSI, SD + clock status, logged row count

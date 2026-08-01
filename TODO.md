@@ -23,7 +23,12 @@ USB port used for flashing.
 ## Current Working Checkpoint
 
 - ESP32-S3 boots and starts Serial (USB CDC) at 115200 baud.
-- Wi-Fi access point starts as `IrrigationLogger`.
+- Wi-Fi access point starts as `IrrigationLogger-<last 6 hex chars of AP MAC>`
+  (e.g. `IrrigationLogger-1B1FEC`), so multiple loggers can be told apart on site.
+- A web-based OTA updater is live: the dashboard's "Firmware Update" card uploads a
+  `.bin` to `POST /update`, which flashes it via the `Update` library and reboots.
+  Requires `board_build.partitions = default_16MB.csv` (adds the ota_0/ota_1 slots
+  Update.h needs — the board's default partition table doesn't have them).
 - Local status page is available at `http://192.168.4.1`.
 - JSON status is available at `http://192.168.4.1/status`.
 - I2C bus scan runs cleanly on GPIO 15 (SDA) / GPIO 7 (SCL) — no ADS1115/OLED
@@ -112,10 +117,14 @@ Card must be FAT32.
    (GPIO 15 SDA / GPIO 7 SCL) and confirm both are detected in the `/status` scan.
 2. Confirm the 5V supply pin for the pressure sensor's red wire on this board.
 3. Insert a FAT32 microSD card and confirm `/download` returns real logged rows.
-4. Confirm the `IrrigationLogger` AP is actually visible over the air from a phone/
-   laptop (only checked via serial log + an inconclusive automated Wi-Fi scan so far).
-5. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
-6. Clean up the firmware into modules after the hardware path is proven.
+4. Confirm the `IrrigationLogger-<MAC suffix>` AP is actually visible over the air
+   from a phone/laptop (only checked via serial log + an inconclusive automated
+   Wi-Fi scan so far).
+5. Test the OTA updater end-to-end from a phone or second device (this Mac can't
+   test it directly — joining the AP drops the internet connection this session
+   needs).
+6. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
+7. Clean up the firmware into modules after the hardware path is proven.
 
 ## Calibration Notes
 
