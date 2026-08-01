@@ -3,9 +3,9 @@
 ## Board: LilyGo T-SIM7080G-S3
 
 The project moved from a classic-ESP32 DOIT DevKit to a **LilyGo T-SIM7080G-S3**
-(ESP32-S3, onboard AXP2101 PMU, onboard microSD slot, SIM7080G modem — modem/PMU
-unused by this firmware so far). This replaces the old board entirely; the wiring
-facts below are for the new board only.
+(ESP32-S3, onboard AXP2101 PMU, onboard microSD slot, SIM7080G modem — LTE-M/NB-IoT
+data plus battery/power status now both working, see below). This replaces the old
+board entirely; the wiring facts below are for the new board only.
 
 Porting from the DOIT DevKit surfaced two ESP32-S3 gotchas worth remembering:
 - **GPIO 22-25 don't exist** on the S3 (unlike classic ESP32's continuous GPIO range).
@@ -67,6 +67,31 @@ USB port used for flashing.
   a **software clock** — an epoch captured against `millis()` — instead. It resets to
   ms-since-boot on every reboot until re-synced from the browser.
 - Live web dashboard at `http://192.168.4.1`: pressure gauge, chip-status pills, clock sync, JSON/CSV links.
+- **Cellular data (SIM7080G) confirmed working end-to-end** on a Soracom SIM
+  (`apn=soracom.io`, `user=sora`, `pass=sora`): modem powers on, registers on the
+  network, connects GPRS, and a plain HTTP GET to `example.com` gets a real `200 OK`
+  — proven live on-device, not just compiling. Registration/GPRS connection happen
+  gradually in the background (`updateModemState()`, polled from `loop()`) so the
+  Wi-Fi AP and dashboard come up immediately at boot instead of waiting on the modem.
+  `/status` exposes `modem_detected`, `network_connected`, `gprs_connected`,
+  `signal_quality`, `modem_ip`, `connectivity_ok`; the dashboard has a "Cellular" card
+  for all of it. Two non-obvious things that cost real debugging time, both fixed:
+  - **The SIM7080G's power comes from the PMU's DC3 rail**, not directly from
+    battery/USB. Without `pmu.setDC3Voltage(3300); pmu.enableDC3();` the modem has no
+    power at all — PWRKEY toggling alone does nothing, and it never answers AT
+    commands no matter how long you wait.
+  - The modem defaults to `AT+CNMP=38` (LTE-only). `beginModemHardware()` now sets it
+    to `AT+CNMP=2` (automatic) so it isn't needlessly restricted to a sub-mode while
+    searching for a cell to register on.
+  Also confirmed: `signal=99` (CSQ "unknown") that never changes over a couple of
+  minutes reliably means **no antenna connected** — connect the LTE/cellular antenna
+  to the connector labeled "NB-IOT Antenna" on the board (there's a separate one for
+  GPS, don't mix them up).
+- Battery/power status via the same AXP2101 PMU: `/status` exposes `pmu_ready`,
+  `battery_connected`, `battery_voltage_mv`, `battery_percent`, `battery_charging`,
+  `vbus_present` (external power present); shown on the dashboard's "Power" card.
+  Battery percent is only meaningful once the PMU has been through a full
+  charge/discharge cycle to calibrate its curve — expect it to be inaccurate at first.
 - Pressure calibrated for the 0-80 PSI sensor: zero anchored at 0.437 V, 20 PSI/V slope
   (calibration itself is unchanged by the board swap — same sensor, same divider math).
 - Logging interval is web-adjustable (`/setinterval`, dashboard dropdown), saved to flash
@@ -126,6 +151,24 @@ Built into the board — no external module. Uses the ESP32-S3 SDMMC peripheral 
 
 Card must be FAT32.
 
+### SIM7080G Modem (onboard)
+
+Built into the board, on its own UART (not the shared I2C bus):
+
+| Signal | ESP32-S3 Pin |
+| --- | --- |
+| PWRKEY | GPIO 41 |
+| DTR | GPIO 42 |
+| RX (ESP32 RX <- modem TX) | GPIO 4 |
+| TX (ESP32 TX -> modem RX) | GPIO 5 |
+
+Power comes from the PMU's DC3 rail (`pmu.setDC3Voltage(3300); pmu.enableDC3();` —
+see the Current Working Checkpoint note above), not directly from battery/USB.
+Requires the LTE/cellular antenna connected to the board's connector labeled
+"NB-IOT Antenna" — there's a separate connector for the GPS antenna, don't mix them
+up. A GPS antenna is also connected on this unit, but nothing in the firmware uses
+GPS yet (see Next Steps).
+
 ## Observed Readings
 
 - A0 tied to GND read about `0.0000 V`.
@@ -147,6 +190,10 @@ Card must be FAT32.
    too, the same way it blocks `target="_blank"` — untested).
 5. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
 6. Clean up the firmware into modules after the hardware path is proven.
+7. Optional: a GPS antenna is connected on this unit but nothing uses it yet — decide
+   whether logging lat/long (via the SIM7080G's built-in GNSS) is worth adding, e.g.
+   for a mobile/multi-site deployment where knowing which physical logger is which
+   matters more than it does for a single fixed installation.
 
 ## Calibration Notes
 

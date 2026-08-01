@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-ESP32-S3 firmware (PlatformIO + Arduino framework) for an irrigation pressure logger, running on a **LilyGo T-SIM7080G-S3** board. A 0-80 PSI / 0.5-4.5 V pressure transducer feeds an ADS1115 ADC over I2C; the board hosts a Wi-Fi access point serving a live dashboard. An SSD1306 OLED shows live readings, and the CSV log is written to the board's onboard microSD slot. There is no hardware RTC — timestamps come from a software clock synced from the browser via `/settime` (see "Two parallel realities" below).
+ESP32-S3 firmware (PlatformIO + Arduino framework) for an irrigation pressure logger, running on a **LilyGo T-SIM7080G-S3** board. A 0-80 PSI / 0.5-4.5 V pressure transducer feeds an ADS1115 ADC over I2C; the board hosts a Wi-Fi access point serving a live dashboard. An SSD1306 OLED shows live readings, and the CSV log is written to the board's onboard microSD slot. There is no hardware RTC — timestamps come from a software clock synced from the browser via `/settime` (see "Two parallel realities" below). The board's SIM7080G modem provides confirmed-working cellular data connectivity (LTE-M/NB-IoT), and its AXP2101 PMU exposes battery/power status — see "Cellular modem & battery (PMU)" below.
 
 ## Commands
 
@@ -37,10 +37,11 @@ There are meaningful discrepancies between the working firmware (`main.cpp`, mat
 | Sample interval | 2 s (`AdcReadIntervalMs`) | 5 min (`SampleIntervalMs`) |
 | microSD | Onboard slot via **SD_MMC** (1-bit mode, pins 38/39/40) — **not** SPI, **not** an external HW-125 module | Implemented in stubs (SPI-based) |
 | RTC | **None.** No hardware RTC on this board — `/settime` sets a software clock (epoch + `millis()` offset) that resets on reboot until re-synced | Implemented in stubs (assumes DS3231) |
+| Cellular data / battery | SIM7080G modem + AXP2101 PMU, confirmed working end-to-end (see "Cellular modem & battery" below) | Not implemented in stubs |
 
 Some ESP32-S3 GPIO numbers that matter if you touch pin assignments: **GPIO 22-25 don't exist** on the S3 (unlike classic ESP32), and **GPIO 19/20 are hardwired to the native USB D-/D+ lines** — reusing them for anything else breaks the USB serial connection. Both were hit while porting this firmware from the original classic-ESP32 DOIT DevKit board.
 
-`lib_deps` currently lists only `Adafruit SSD1306` (`SD_MMC` and `Preferences` are built into the ESP32 Arduino core, no separate dependency). Activating the stub modules would additionally require `Adafruit ADS1X15` and `ArduinoJson`, plus updating `build_src_filter`.
+`lib_deps` lists `Adafruit SSD1306`, `vshymanskyy/TinyGSM` (modem), and `lewisxhe/XPowersLib` (PMU) — (`SD_MMC` and `Preferences` are built into the ESP32 Arduino core, no separate dependency). Activating the stub modules would additionally require `Adafruit ADS1X15` and `ArduinoJson`, plus updating `build_src_filter`.
 
 ## Pressure calculation
 
@@ -53,7 +54,7 @@ MAC in `setup()`, so multiple loggers on the same site can be told apart. `/stat
 reports the full `ap_ssid` string.
 
 - `GET /` — live HTML dashboard (pressure gauge, status pills, clock sync, log controls)
-- `GET /status` — JSON: AP info, I2C scan, ADS1115/OLED detection, A0/sensor voltage, PSI, SD + clock status, logged row count
+- `GET /status` — JSON: AP info, I2C scan, ADS1115/OLED detection, A0/sensor voltage, PSI, SD + clock status, logged row count, cellular modem status, battery/PMU status
 - `GET /download` — CSV export of the log file
 - `GET /settime?epoch=<unix seconds>` — sets the software clock (browser sends local wall-clock time, already timezone-shifted)
 - `GET /resetlog` — truncates the CSV log and restarts the row counter
@@ -66,6 +67,51 @@ reports the full `ap_ssid` string.
 A `DNSServer` on port 53 (`dnsServer.start(DnsPort, "*", WiFi.softAPIP())`, serviced by `dnsServer.processNextRequest()` in `loop()`) resolves every DNS query to the board's own IP. Combined with `server.onNotFound(handleRoot)`, this means the OS's "is this network captive?" probe gets served the dashboard instead of the expected response, which is what makes phones auto-pop a captive-portal mini-browser to it on connecting — the same UX as hotel/airport Wi-Fi logins. A phone that already joined this exact SSID successfully before this feature existed may have it cached as "no login needed" and skip the check on rejoin; forgetting and rejoining the network resets that.
 
 That mini-browser is locked down (confirmed on iPhone: no tabs, no bookmarking, and critically, a `target="_blank"` link — the naive escape trick — does **nothing** in it; iOS blocks it from opening Safari). An earlier version tried the "real" fix — an email-gated form that flips a server-side flag so the OS's background captive-check probe (matched by path, e.g. `/hotspot-detect.html`, `/generate_204`) gets answered with the literal response a non-captive network would give, which is what makes the OS auto-dismiss the window on its own. That added genuine complexity (unlock state, per-client re-arming on new station connect, a probe handler per OS) for a payoff never confirmed to actually work, so it was dropped in favor of something simpler: a small IP chip in the header (next to the title/connection status) that copies `http://192.168.4.1` to the clipboard (Clipboard API, falling back to `execCommand("copy")`), so the user can back out of the captive window (its own Done/Cancel) and paste the address into Safari/Chrome themselves. If you're tempted to resurrect the probe-response approach, search git history for `handleCaptiveProbeApple`/`handleCaptiveLogin` — it's a legitimate technique, just more than this project needed.
+
+## Cellular modem & battery (PMU)
+
+The SIM7080G modem (LTE-M/NB-IoT/GPRS) and battery/power status via the AXP2101 PMU
+are both confirmed working end-to-end on real hardware with a Soracom SIM (not just
+compiling) — see `beginModemHardware()`/`updateModemState()`/`checkInternetReachable()`
+and `beginPmu()`/`updateBatteryReading()`.
+
+**The SIM7080G's power comes from the PMU's DC3 rail**, not directly from
+battery/USB — `pmu.setDC3Voltage(3300); pmu.enableDC3();` in `beginPmu()` is
+required before the modem has any power at all. Without it, PWRKEY toggling does
+nothing and the modem never answers AT commands, no matter how long you wait or how
+many times you re-pulse it — this cost real debugging time before a LilyGo GitHub
+issue (`BOD triggered on DC3 enable`) confirmed the rail. `beginPmu()` runs before
+`beginModemHardware()` in `setup()` — keep that order.
+
+The modem defaults to `AT+CNMP=38` (LTE-only); `beginModemHardware()` sets it to
+`AT+CNMP=2` (automatic) so registration isn't needlessly restricted to one sub-mode.
+`signal_quality` stuck at `99` (CSQ "unknown") for more than a minute or two reliably
+means **no antenna connected** (or connected to the wrong port — this board has a
+separate GPS antenna connector; cellular goes on the one labeled "NB-IOT Antenna"),
+not a config or coverage problem — confirmed by testing both states on this exact
+board.
+
+Registration and GPRS connection happen gradually via `updateModemState()`, a small
+state machine polled every `ModemPollIntervalMs` from `loop()` (`ModemStateInit` ->
+`ModemStateWaitNetwork` -> `ModemStateConnectGprs` -> `ModemStateReady`), rather than
+blocking `setup()` — registration can take anywhere from seconds to a couple of
+minutes depending on signal, and the Wi-Fi AP/dashboard shouldn't wait on that.
+`checkInternetReachable()` does one plain HTTP GET to `example.com:80` (not HTTPS, to
+avoid needing TLS over the modem) purely to prove the cellular data path reaches the
+real internet, not to fetch anything useful. When reading its response: check
+`available()` *before* `connected()` in the read loop — the remote end can send its
+response and close the socket quickly (`Connection: close` was requested), so
+checking `connected()` first can miss data still sitting in the read buffer.
+
+`/status` exposes `modem_detected`, `network_connected`, `gprs_connected`,
+`signal_quality`, `modem_ip`, `connectivity_checked`, `connectivity_ok`, `pmu_ready`,
+`battery_connected`, `battery_voltage_mv`, `battery_percent`, `battery_charging`,
+`vbus_present`. The dashboard has "Power" and "Cellular" cards for these. Battery
+percent is only meaningful once the PMU has calibrated its curve over a full
+charge/discharge cycle — expect it to be inaccurate at first.
+
+Soracom SIM credentials (`ModemApn`/`ModemApnUser`/`ModemApnPass` in `main.cpp`):
+`soracom.io` / `sora` / `sora`.
 
 ## Firmware versioning & releases
 

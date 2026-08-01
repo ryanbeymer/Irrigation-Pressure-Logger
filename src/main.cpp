@@ -8,6 +8,12 @@
 #include <WiFi.h>
 #include <Wire.h>
 
+// Must be defined before their respective library includes below.
+#define XPOWERS_CHIP_AXP2101
+#include <XPowersLib.h>
+#define TINY_GSM_MODEM_SIM7080
+#include <TinyGsmClient.h>
+
 // Injected by scripts/get_firmware_version.py from `git describe` at build
 // time (e.g. "v1.2.0", "v1.2.0-3-gabc1234", or "abc1234-dirty" without a tag).
 #ifndef FIRMWARE_VERSION
@@ -44,6 +50,29 @@ constexpr int SdmmcDataPin = 40;
 constexpr const char *LogPath = "/pressure_log.csv";
 constexpr const char *CsvHeader = "timestamp,millis,pressure_psi,voltage";
 
+// LilyGo T-SIM7080G-S3-PMU modem UART + power control pins (from LilyGo's
+// LilyGo-Modem-Series utilities.h, LILYGO_SIM7080G_S3 board block).
+constexpr uint8_t ModemPwrkeyPin = 41;
+constexpr uint8_t ModemDtrPin = 42;
+constexpr uint8_t ModemRxPin = 4;   // ESP32 RX <- modem TX
+constexpr uint8_t ModemTxPin = 5;   // ESP32 TX -> modem RX
+constexpr uint32_t ModemBaud = 115200;
+// SIM7080's required PWRKEY pulse width (varies by modem family; see
+// LilyGo's MODEM_POWERON_PULSE_WIDTH_MS table).
+constexpr unsigned long ModemPoweronPulseMs = 1000;
+constexpr unsigned long ModemAtTimeoutMs = 30000;
+
+// Soracom SIM.
+constexpr const char *ModemApn = "soracom.io";
+constexpr const char *ModemApnUser = "sora";
+constexpr const char *ModemApnPass = "sora";
+
+// Plain HTTP (not HTTPS, to avoid needing TLS over the modem) target used
+// purely to confirm the cellular data path actually reaches the internet.
+constexpr const char *ConnectivityCheckHost = "example.com";
+constexpr uint16_t ConnectivityCheckPort = 80;
+constexpr unsigned long ModemPollIntervalMs = 2000;
+
 // Captive portal: a DNS server that resolves every hostname to our own IP,
 // so the OS's "is this network captive?" check gets routed to the dashboard
 // instead of the real internet, and the phone auto-opens a browser to it.
@@ -70,6 +99,40 @@ unsigned long loggedRowCount = 0;
 bool clockSynced = false;
 time_t clockEpochAtSync = 0;
 unsigned long clockSyncMillis = 0;
+
+// Cellular modem (SIM7080G). Network registration and GPRS connection happen
+// gradually via updateModemState(), called from loop(), so the Wi-Fi AP and
+// dashboard come up immediately at boot instead of waiting on the modem.
+HardwareSerial SerialAT(1);
+TinyGsm modem(SerialAT);
+TinyGsmClient modemClient(modem);
+
+enum ModemState {
+  ModemStateInit,
+  ModemStateWaitNetwork,
+  ModemStateConnectGprs,
+  ModemStateReady,
+  ModemStateFailed,
+};
+ModemState modemState = ModemStateInit;
+bool modemDetected = false;
+bool networkConnected = false;
+bool gprsConnected = false;
+int16_t signalQuality = 99;  // 99 = "unknown", per the standard 3GPP CSQ scale
+String modemInfo = "";
+String modemLocalIp = "";
+bool connectivityChecked = false;
+bool connectivityOk = false;
+unsigned long lastModemPollMs = 0;
+
+// PMU (AXP2101) battery/power status.
+XPowersPMU pmu;
+bool pmuReady = false;
+bool batteryConnected = false;
+uint16_t batteryVoltageMv = 0;
+uint8_t batteryPercent = 0;
+bool batteryCharging = false;
+bool vbusPresent = false;
 Preferences prefs;
 unsigned long logIntervalMs = DefaultLogIntervalMs;
 unsigned long lastLogMs = 0;
@@ -322,6 +385,191 @@ void updateAdcReading() {
   }
 }
 
+void beginPmu() {
+  pmuReady = pmu.begin(Wire, AXP2101_SLAVE_ADDRESS, I2cSdaPin, I2cSclPin);
+  if (!pmuReady) {
+    Serial.println("PMU (AXP2101) not detected");
+    return;
+  }
+
+  // No battery temperature sensor is wired; leaving TS measurement enabled
+  // makes the PMU think the battery is out of temperature range and refuse
+  // to charge it.
+  pmu.disableTSPinMeasure();
+  pmu.enableBattDetection();
+  pmu.enableVbusVoltageMeasure();
+  pmu.enableBattVoltageMeasure();
+  pmu.enableSystemVoltageMeasure();
+
+  // The SIM7080G's power comes from the PMU's DC3 rail, not directly from
+  // the battery/USB -- without this the modem has no power at all, and no
+  // amount of PWRKEY toggling will make it respond to AT commands.
+  pmu.setDC3Voltage(3300);
+  pmu.enableDC3();
+
+  Serial.println("PMU (AXP2101) initialized");
+}
+
+void updateBatteryReading() {
+  if (!pmuReady) {
+    return;
+  }
+
+  batteryConnected = pmu.isBatteryConnect();
+  batteryVoltageMv = pmu.getBattVoltage();
+  // Percent estimate needs a battery present; the PMU calibrates it over a
+  // charge/discharge cycle, so it may be inaccurate right after first use.
+  batteryPercent = batteryConnected ? pmu.getBatteryPercent() : 0;
+  batteryCharging = pmu.isCharging();
+  vbusPresent = pmu.isVbusIn();
+}
+
+// Powers on the SIM7080G and waits (with a bounded timeout) for it to
+// respond to AT commands. Network registration and GPRS connection are
+// handled afterward by updateModemState(), so this doesn't block setup()
+// for the tens of seconds those can take.
+void pulseModemPwrkey() {
+  digitalWrite(ModemPwrkeyPin, LOW);
+  delay(100);
+  digitalWrite(ModemPwrkeyPin, HIGH);
+  delay(ModemPoweronPulseMs);
+  digitalWrite(ModemPwrkeyPin, LOW);
+}
+
+void beginModemHardware() {
+  pinMode(ModemDtrPin, OUTPUT);
+  digitalWrite(ModemDtrPin, LOW);  // keep the modem out of sleep
+
+  pinMode(ModemPwrkeyPin, OUTPUT);
+  pulseModemPwrkey();
+
+  SerialAT.begin(ModemBaud, SERIAL_8N1, ModemRxPin, ModemTxPin);
+
+  Serial.println("Waiting for modem...");
+  // The modem needs a few seconds after the power pulse before it starts
+  // answering AT commands at all; testing immediately just wastes retries.
+  delay(3000);
+
+  const unsigned long start = millis();
+  int pulseCount = 1;
+  while (millis() - start < ModemAtTimeoutMs) {
+    if (modem.testAT(1000)) {
+      modemDetected = true;
+      break;
+    }
+    Serial.print(".");
+    // If a full power-on pulse's worth of attempts has passed with no
+    // response, it may have missed the first pulse; try again.
+    if ((millis() - start) > pulseCount * 8000UL) {
+      pulseCount++;
+      Serial.println();
+      Serial.println("No response yet; re-pulsing PWRKEY");
+      pulseModemPwrkey();
+    }
+  }
+  Serial.println();
+
+  if (!modemDetected) {
+    Serial.println("Modem not responding to AT commands");
+    modemState = ModemStateFailed;
+    return;
+  }
+
+  modem.init();
+  modemInfo = modem.getModemInfo();
+  Serial.printf("Modem detected: %s\n", modemInfo.c_str());
+
+  // The modem defaults to CNMP=38 (LTE-only, no broader fallback); set it to
+  // automatic so it isn't restricted to a single sub-mode while registering.
+  modem.sendAT("+CNMP=2");
+  modem.waitResponse(2000);
+
+  modemState = ModemStateWaitNetwork;
+}
+
+// A plain HTTP GET used only to confirm the cellular data path actually
+// reaches the internet, not to fetch anything useful.
+bool checkInternetReachable() {
+  if (!modemClient.connect(ConnectivityCheckHost, ConnectivityCheckPort, 15)) {
+    Serial.println("Cellular connectivity check: TCP connect failed");
+    return false;
+  }
+
+  modemClient.print(String("GET / HTTP/1.0\r\nHost: ") + ConnectivityCheckHost +
+                     "\r\nConnection: close\r\n\r\n");
+  modemClient.flush();
+
+  // Checked before connected(): the remote end can send its response and
+  // close the socket quickly (we asked for Connection: close), so checking
+  // connected() first can miss data that's still sitting in the read buffer.
+  const unsigned long start = millis();
+  while (millis() - start < 20000) {
+    if (modemClient.available()) {
+      const String statusLine = modemClient.readStringUntil('\n');
+      modemClient.stop();
+      return statusLine.indexOf(" 200 ") > 0;
+    }
+    if (!modemClient.connected()) {
+      break;
+    }
+    delay(50);
+  }
+  modemClient.stop();
+  return false;
+}
+
+// Advances the modem's registration/GPRS state by one step. Called
+// periodically from loop() rather than blocking, since registration can
+// take anywhere from a few seconds to over a minute depending on signal.
+void updateModemState() {
+  switch (modemState) {
+    case ModemStateInit:
+    case ModemStateFailed:
+      return;
+
+    case ModemStateWaitNetwork:
+      signalQuality = modem.getSignalQuality();
+      networkConnected = modem.isNetworkConnected();
+      if (networkConnected) {
+        Serial.println("Modem registered on network; connecting GPRS...");
+        modemState = ModemStateConnectGprs;
+      }
+      return;
+
+    case ModemStateConnectGprs:
+      if (modem.gprsConnect(ModemApn, ModemApnUser, ModemApnPass)) {
+        gprsConnected = true;
+        modemLocalIp = modem.getLocalIP();
+        Serial.printf("GPRS connected; IP: %s\n", modemLocalIp.c_str());
+        modemState = ModemStateReady;
+      } else {
+        Serial.println("GPRS connect failed; will retry");
+        if (!modem.isNetworkConnected()) {
+          networkConnected = false;
+          modemState = ModemStateWaitNetwork;
+        }
+      }
+      return;
+
+    case ModemStateReady:
+      gprsConnected = modem.isGprsConnected();
+      signalQuality = modem.getSignalQuality();
+      if (!gprsConnected) {
+        Serial.println("GPRS connection dropped; reconnecting");
+        networkConnected = modem.isNetworkConnected();
+        modemState = ModemStateWaitNetwork;
+        return;
+      }
+      if (!connectivityChecked) {
+        connectivityChecked = true;
+        connectivityOk = checkInternetReachable();
+        Serial.printf("Cellular connectivity check: %s\n",
+                      connectivityOk ? "reachable" : "unreachable");
+      }
+      return;
+  }
+}
+
 void handleRoot() {
   // 'static' keeps this ~6 KB page in flash. Without it the array is built on
   // the loop task's stack, overflowing it and tripping the stack canary.
@@ -423,8 +671,33 @@ void handleRoot() {
       <span class="pill" id="p-adc"><span class="dot"></span>Sensor ADC</span>
       <span class="pill" id="p-oled"><span class="dot"></span>OLED</span>
       <span class="pill" id="p-sd"><span class="dot"></span>Log</span>
-      <span class="pill" id="p-rtc"><span class="dot"></span>Clock</span>
       <span class="rows">Rows: <b id="rows">--</b></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Power</h2>
+    <div class="subs">
+      <div><div class="k">Battery</div><div class="v"><span id="battpct">--</span>%</div></div>
+      <div><div class="k">Voltage</div><div class="v"><span id="battmv">--</span> mV</div></div>
+    </div>
+    <div class="pills" style="margin-top:.75rem;">
+      <span class="pill" id="p-charging"><span class="dot"></span>Charging</span>
+      <span class="pill" id="p-vbus"><span class="dot"></span>Powered</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Cellular</h2>
+    <div class="subs">
+      <div><div class="k">Signal</div><div class="v" id="cellsignal">--</div></div>
+      <div><div class="k">IP</div><div class="v" style="font-size:.85rem;" id="cellip">--</div></div>
+    </div>
+    <div class="pills" style="margin-top:.75rem;">
+      <span class="pill" id="p-modem"><span class="dot"></span>Modem</span>
+      <span class="pill" id="p-network"><span class="dot"></span>Network</span>
+      <span class="pill" id="p-gprs"><span class="dot"></span>GPRS</span>
+      <span class="pill" id="p-internet"><span class="dot"></span>Internet</span>
     </div>
   </div>
 
@@ -489,10 +762,27 @@ void handleRoot() {
     setPill("p-adc",j.ads1115_detected);
     setPill("p-oled",j.oled_ready);
     setPill("p-sd",j.sd_ready);
-    setPill("p-rtc",j.rtc_ready);
     document.getElementById("rows").textContent=j.logged_rows;
     document.getElementById("logtime").textContent=j.timestamp;
     document.getElementById("fwver").textContent=j.firmware_version;
+
+    document.getElementById("battpct").textContent=j.battery_connected?j.battery_percent:"--";
+    document.getElementById("battmv").textContent=j.battery_voltage_mv;
+    setPill("p-charging",j.battery_charging);
+    setPill("p-vbus",j.vbus_present);
+
+    var sq=Number(j.signal_quality);
+    var sigLabel="no signal";
+    if(sq!==99){
+      var quality=sq>=20?"good":sq>=10?"fair":"weak";
+      sigLabel=sq+"/31 ("+quality+")";
+    }
+    document.getElementById("cellsignal").textContent=sigLabel;
+    document.getElementById("cellip").textContent=j.modem_ip||"--";
+    setPill("p-modem",j.modem_detected);
+    setPill("p-network",j.network_connected);
+    setPill("p-gprs",j.gprs_connected);
+    setPill("p-internet",j.connectivity_ok);
     // Sync the dropdown to the saved interval once, so we don't fight the user.
     if(!intervalLoaded && j.log_interval_ms){
       document.getElementById("loginterval").value=String(j.log_interval_ms);
@@ -656,7 +946,21 @@ void handleStatus() {
       "\"log_interval_ms\":" + String(logIntervalMs) + "," +
       "\"rtc_ready\":" + String(clockSynced ? "true" : "false") + "," +
       "\"timestamp\":\"" + currentTimestamp() + "\"," +
-      "\"pressure_sensor\":\"connected_via_10k_1k_divider\"}";
+      "\"pressure_sensor\":\"connected_via_10k_1k_divider\"," +
+      "\"modem_detected\":" + String(modemDetected ? "true" : "false") + "," +
+      "\"modem_info\":\"" + modemInfo + "\"," +
+      "\"network_connected\":" + String(networkConnected ? "true" : "false") + "," +
+      "\"gprs_connected\":" + String(gprsConnected ? "true" : "false") + "," +
+      "\"signal_quality\":" + String(signalQuality) + "," +
+      "\"modem_ip\":\"" + modemLocalIp + "\"," +
+      "\"connectivity_checked\":" + String(connectivityChecked ? "true" : "false") + "," +
+      "\"connectivity_ok\":" + String(connectivityOk ? "true" : "false") + "," +
+      "\"pmu_ready\":" + String(pmuReady ? "true" : "false") + "," +
+      "\"battery_connected\":" + String(batteryConnected ? "true" : "false") + "," +
+      "\"battery_voltage_mv\":" + String(batteryVoltageMv) + "," +
+      "\"battery_percent\":" + String(batteryPercent) + "," +
+      "\"battery_charging\":" + String(batteryCharging ? "true" : "false") + "," +
+      "\"vbus_present\":" + String(vbusPresent ? "true" : "false") + "}";
   server.send(200, "application/json", json);
 }
 
@@ -794,6 +1098,8 @@ void setup() {
   scanI2cBus();
   beginSd();
   updateAdcReading();
+  beginPmu();
+  beginModemHardware();
 
   WiFi.mode(WIFI_AP);
 
@@ -843,5 +1149,11 @@ void loop() {
   if (now - lastLogMs >= logIntervalMs) {
     lastLogMs = now;
     appendLogRow();
+  }
+
+  if (now - lastModemPollMs >= ModemPollIntervalMs) {
+    lastModemPollMs = now;
+    updateModemState();
+    updateBatteryReading();
   }
 }

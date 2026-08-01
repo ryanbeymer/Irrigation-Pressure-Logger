@@ -24,6 +24,12 @@ own Wi-Fi access point.
 - Shows live pressure, connection info, and log status on the SSD1306 OLED.
 - Updates itself over the air: upload a `.bin` through the dashboard's "Firmware
   Update" card, no USB/PlatformIO required.
+- Connects to the internet over cellular (SIM7080G, LTE-M/NB-IoT) independent of the
+  Wi-Fi AP — confirmed working on a Soracom SIM. Registration and connection happen
+  in the background so the dashboard is available immediately at boot. The
+  dashboard's "Cellular" card shows signal, registration/GPRS status, and IP.
+- Reports battery/power status (via the board's AXP2101 PMU) on the dashboard's
+  "Power" card: battery percent, voltage, and charging state.
 
 ## Web endpoints (AP `IrrigationLogger-<MAC suffix>`, `http://192.168.4.1`)
 
@@ -37,15 +43,24 @@ own Wi-Fi access point.
 | `/setinterval?ms=<n>` | Set how often a row is logged (persisted to flash) |
 | `/update` (POST) | OTA firmware upload — dashboard's "Firmware Update" card |
 
+`/status` also includes cellular modem fields (`modem_detected`, `network_connected`,
+`gprs_connected`, `signal_quality`, `modem_ip`, `connectivity_ok`) and battery/PMU
+fields (`battery_connected`, `battery_voltage_mv`, `battery_percent`,
+`battery_charging`, `vbus_present`).
+
 ## Hardware
 
 - **Board:** LilyGo T-SIM7080G-S3 (ESP32-S3, onboard AXP2101 PMU, onboard microSD
-  slot, SIM7080G modem — modem/PMU unused by this firmware so far), built via
-  PlatformIO board `esp32-s3-devkitc-1` (closest generic match)
+  slot, SIM7080G modem), built via PlatformIO board `esp32-s3-devkitc-1` (closest
+  generic match)
 - **Sensor:** 0-80 PSI transducer, 0.5-4.5 V output (green = signal, red = 5 V, black = GND)
 - **ADC:** ADS1115 over I2C (`0x48`)
 - **Storage:** onboard microSD slot, SDMMC 1-bit mode (not SPI, no external module)
 - **Display:** SSD1306 OLED over I2C (`0x3C`)
+- **Modem:** SIM7080G (LTE-M/NB-IoT/GPRS, plus GNSS — GPS isn't used by this firmware
+  yet), needs the cellular antenna on the connector labeled "NB-IOT Antenna" (there's
+  a separate one for GPS)
+- **PMU:** AXP2101 — also powers the modem (its DC3 rail) and reports battery status
 
 ### Wiring
 
@@ -61,6 +76,16 @@ I2C modules (ADS1115, OLED) are powered from **3V3**.
 Full wiring references:
 - **`wiring-guide.html`** — pin-by-pin tables (predates the LilyGo port; check `TODO.md` first for current pins).
 - **`TODO.md`** — confirmed wiring, observed readings, and calibration notes.
+
+## Cellular data
+
+Configured for a Soracom SIM (`apn=soracom.io`, `user=sora`, `pass=sora` — constants
+at the top of `src/main.cpp`); swap those for a different carrier's APN as needed.
+Registration/GPRS connection happen gradually in the background after boot rather
+than blocking startup, since that can take anywhere from seconds to a couple of
+minutes depending on signal. Requires the cellular antenna connected to the "NB-IOT
+Antenna" connector — without it, signal reads as permanently unknown/zero regardless
+of SIM or APN configuration.
 
 ## Calibration
 
