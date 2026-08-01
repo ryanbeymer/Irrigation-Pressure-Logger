@@ -71,6 +71,16 @@ bool clockSynced = false;
 time_t clockEpochAtSync = 0;
 unsigned long clockSyncMillis = 0;
 Preferences prefs;
+
+// Captive-portal "login": while false, the OS's background captive-check probes
+// (see the handlers below) get served the dashboard, which is what keeps its
+// captive-portal window open. Submitting the dashboard's email form flips this to
+// true, so the next probe gets a real "you're online" response and the OS
+// auto-dismisses that window. Re-armed per newly-connected Wi-Fi client (see
+// onApStationConnected) so a second phone still gets its own prompt.
+bool captivePortalUnlocked = false;
+String capturedEmail = "";
+
 unsigned long logIntervalMs = DefaultLogIntervalMs;
 unsigned long lastLogMs = 0;
 
@@ -385,8 +395,14 @@ void handleRoot() {
   .links a{flex:1;text-align:center;text-decoration:none;color:var(--ink);font-weight:600;
     background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:.7rem;}
   .links a:active{background:var(--line);}
-  .portal-banner{text-align:center;padding:.6rem 1rem;font-size:.8rem;}
-  .portal-banner a{color:var(--accent);text-decoration:none;font-weight:600;}
+  .portal-banner{text-align:center;padding:.7rem 1rem;font-size:.8rem;color:var(--muted);}
+  .portal-url{font-family:var(--mono);font-size:1rem;font-weight:700;color:var(--ink);
+    margin:.5rem 0;user-select:all;-webkit-user-select:all;}
+  .portal-banner button{margin-top:0;}
+  .portal-form{display:flex;gap:.5rem;margin:.6rem 0;}
+  .portal-form input{flex:1;font:inherit;color:var(--ink);background:var(--card2);
+    border:1px solid var(--line);border-radius:9px;padding:.55rem .7rem;}
+  .portal-divider{margin:.8rem 0;border:0;border-top:1px solid var(--line);}
   footer{margin-top:1.5rem;text-align:center;font-size:.7rem;color:var(--muted);font-family:var(--mono);}
 </style>
 </head>
@@ -398,10 +414,18 @@ void handleRoot() {
   </header>
 
   <div class="card portal-banner">
-    <!-- target="_blank" is deliberate: captive-portal mini-browsers (iOS/Android)
-         don't support opening a new tab themselves, so they hand this off to the
-         real system browser instead -- the standard way out of that limited view. -->
-    <a href="http://192.168.4.1/" target="_blank" rel="noopener">Open in your browser &rarr;</a>
+    <div>In this limited in-app browser? Enter your email and continue &mdash;
+      your normal browser should open on its own within a few seconds:</div>
+    <form class="portal-form" action="/captive-login" method="get">
+      <input type="email" name="email" placeholder="you@example.com" required>
+      <button type="submit">Continue</button>
+    </form>
+    <hr class="portal-divider">
+    <div>Or copy the address, close this window (Done/Cancel), and paste it into
+      Safari or Chrome yourself:</div>
+    <div class="portal-url" id="portalUrl">http://192.168.4.1</div>
+    <button class="ghost" id="copyUrl" type="button">Copy address</button>
+    <span class="msg" id="copyMsg"></span>
   </div>
 
   <div class="card hero">
@@ -598,6 +622,24 @@ void handleRoot() {
       xhr.send(data);
     });
   })();
+  document.getElementById("copyUrl").addEventListener("click",function(){
+    var text=document.getElementById("portalUrl").textContent;
+    var msg=document.getElementById("copyMsg");
+    function fallbackCopy(){
+      var ta=document.createElement("textarea");
+      ta.value=text;ta.style.position="fixed";ta.style.opacity="0";
+      document.body.appendChild(ta);ta.focus();ta.select();
+      var ok=false;
+      try{ok=document.execCommand("copy");}catch(e){}
+      document.body.removeChild(ta);
+      msg.textContent=ok?"Copied!":"Couldn't copy — select the address above and copy manually";
+    }
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){msg.textContent="Copied!";}).catch(fallbackCopy);
+    }else{
+      fallbackCopy();
+    }
+  });
   tickDevice();setInterval(tickDevice,1000);
   refresh();setInterval(refresh,2000);
 </script>
@@ -749,6 +791,56 @@ void handleUpdateResult() {
   ESP.restart();
 }
 
+// Submitted by the dashboard's email form. A real page navigation (not fetch/XHR)
+// so it works the same way inside iOS's restricted captive-portal browser as
+// normal in-page navigation there. Unlocking here doesn't take effect until the
+// OS's next background captive-check probe (a few seconds), which is what
+// actually dismisses that window.
+void handleCaptiveLogin() {
+  if (server.hasArg("email")) {
+    capturedEmail = server.arg("email");
+    Serial.printf("Captive portal: email captured (%s)\n", capturedEmail.c_str());
+  }
+  captivePortalUnlocked = true;
+
+  server.send(200, "text/html",
+              "<!doctype html><html><head><meta name=\"viewport\" "
+              "content=\"width=device-width, initial-scale=1\"></head>"
+              "<body style=\"font-family:system-ui,sans-serif;text-align:center;"
+              "padding:3rem 1.5rem;\"><h2>You're all set</h2>"
+              "<p>Returning you to your browser in a few seconds&hellip;</p></body></html>");
+}
+
+// The OS's background "is this network captive?" probes. Before the email form is
+// submitted, these fall through like any other unmatched path (server.onNotFound
+// -> the dashboard), which is what keeps the captive-portal window open. Once
+// unlocked, they get the exact response each OS expects from a real, non-captive
+// network, which is what makes it auto-dismiss that window on its next check.
+void handleCaptiveProbeApple() {
+  if (!captivePortalUnlocked) {
+    handleRoot();
+    return;
+  }
+  server.send(200, "text/html",
+              "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+}
+
+void handleCaptiveProbeAndroid() {
+  if (!captivePortalUnlocked) {
+    handleRoot();
+    return;
+  }
+  server.send(204, "text/plain", "");
+}
+
+// Re-arms the captive-portal gate whenever a new station joins the AP, so a
+// second phone still gets its own login prompt instead of inheriting whatever
+// state the first phone left behind.
+void onApStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+  captivePortalUnlocked = false;
+  Serial.println("Wi-Fi client connected; captive portal re-armed");
+}
+
 void setup() {
   Serial.begin(SerialBaud);
   delay(100);
@@ -769,6 +861,7 @@ void setup() {
   updateAdcReading();
 
   WiFi.mode(WIFI_AP);
+  WiFi.onEvent(onApStationConnected, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
 
   // Suffix the SSID with the last 6 hex chars of this board's AP MAC so
   // multiple loggers on the same site can be told apart.
@@ -788,9 +881,17 @@ void setup() {
   server.on("/resetlog", HTTP_GET, handleResetLog);
   server.on("/setinterval", HTTP_GET, handleSetInterval);
   server.on("/update", HTTP_POST, handleUpdateResult, handleUpdateUpload);
-  // Any other path (including the OS's captive-portal probe URLs, which
-  // resolve here via the DNS server above) gets the dashboard, which is what
-  // tips off the OS that this network needs a login/portal screen.
+  server.on("/captive-login", HTTP_GET, handleCaptiveLogin);
+  // OS captive-check probe paths (matched by path only; the request's Host
+  // header is whatever the OS used, e.g. captive.apple.com -- irrelevant here
+  // since the DNS server above already routes every hostname to us).
+  server.on("/hotspot-detect.html", HTTP_GET, handleCaptiveProbeApple);
+  server.on("/library/test/success.html", HTTP_GET, handleCaptiveProbeApple);
+  server.on("/generate_204", HTTP_GET, handleCaptiveProbeAndroid);
+  server.on("/gen_204", HTTP_GET, handleCaptiveProbeAndroid);
+  // Any other path (including probe URLs from OSes not listed above) gets the
+  // dashboard, which is what tips off the OS that this network needs a
+  // login/portal screen.
   server.onNotFound(handleRoot);
   server.begin();
 

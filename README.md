@@ -18,8 +18,9 @@ own Wi-Fi access point.
   board) and serves a dashboard at `http://192.168.4.1`.
 - Acts as a captive portal: connecting to the AP should auto-open a browser straight
   to the dashboard, the same way hotel/airport Wi-Fi login screens pop up. That view
-  is usually a restricted mini-browser, so the dashboard has an "Open in your
-  browser" link to escape into full Safari/Chrome.
+  is a restricted mini-browser (no tabs, no bookmarking) — the dashboard has an
+  email-gated "Continue" form, the same technique real captive portals use to hand
+  you back to your normal browser, plus a "Copy address" fallback if that doesn't work.
 - Shows live pressure, connection info, and log status on the SSD1306 OLED.
 - Updates itself over the air: upload a `.bin` through the dashboard's "Firmware
   Update" card, no USB/PlatformIO required.
