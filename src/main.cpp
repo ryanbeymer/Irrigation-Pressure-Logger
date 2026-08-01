@@ -385,6 +385,8 @@ void handleRoot() {
   .links a{flex:1;text-align:center;text-decoration:none;color:var(--ink);font-weight:600;
     background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:.7rem;}
   .links a:active{background:var(--line);}
+  .portal-banner{text-align:center;padding:.6rem 1rem;font-size:.8rem;}
+  .portal-banner a{color:var(--accent);text-decoration:none;font-weight:600;}
   footer{margin-top:1.5rem;text-align:center;font-size:.7rem;color:var(--muted);font-family:var(--mono);}
 </style>
 </head>
@@ -394,6 +396,13 @@ void handleRoot() {
     <h1>Irrigation Logger</h1>
     <span class="conn" id="conn"><span class="dot"></span><span id="conntxt">connecting</span></span>
   </header>
+
+  <div class="card portal-banner">
+    <!-- target="_blank" is deliberate: captive-portal mini-browsers (iOS/Android)
+         don't support opening a new tab themselves, so they hand this off to the
+         real system browser instead -- the standard way out of that limited view. -->
+    <a href="http://192.168.4.1/" target="_blank" rel="noopener">Open in your browser &rarr;</a>
+  </div>
 
   <div class="card hero">
     <div class="psi"><span id="psi">--</span><span>PSI</span></div>

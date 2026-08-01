@@ -42,7 +42,10 @@ USB port used for flashing.
   IP, and `server.onNotFound(handleRoot)` serves the dashboard for any unmatched path
   (including the OS's captive-check probe URLs). Should make phones auto-open a
   browser to the dashboard on connecting to the AP, like a hotel/airport Wi-Fi login
-  screen — **not yet verified on a real device** (see Next Steps).
+  screen — **not yet verified on a real device** (see Next Steps). The dashboard has
+  an "Open in your browser" link (`target="_blank"`) near the top, since captive-portal
+  mini-browsers are typically limited (no tabs, no bookmarking); tapping it hands off
+  to the real system browser, since those mini-browsers don't support opening tabs.
 - Local status page is available at `http://192.168.4.1`.
 - JSON status is available at `http://192.168.4.1/status`.
 - I2C bus scan runs cleanly on GPIO 15 (SDA) / GPIO 7 (SCL) — no ADS1115/OLED
@@ -134,7 +137,9 @@ Card must be FAT32.
 4. Verify the captive portal actually auto-opens a browser on connecting to the AP
    (tested from a phone that's never joined this exact SSID before — a phone that
    already joined it successfully pre-captive-portal may have the network cached as
-   "no login needed" and skip the check; "Forget This Network" then rejoin to retest).
+   "no login needed" and skip the check; "Forget This Network" then rejoin to retest),
+   and confirm the "Open in your browser" link actually escapes the captive-portal
+   mini-browser into Safari/Chrome.
 5. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
 6. Clean up the firmware into modules after the hardware path is proven.
 

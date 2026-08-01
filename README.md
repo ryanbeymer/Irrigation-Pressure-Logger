@@ -17,7 +17,9 @@ own Wi-Fi access point.
 - Hosts a Wi-Fi AP named `IrrigationLogger-<last 6 hex chars of its MAC>` (unique per
   board) and serves a dashboard at `http://192.168.4.1`.
 - Acts as a captive portal: connecting to the AP should auto-open a browser straight
-  to the dashboard, the same way hotel/airport Wi-Fi login screens pop up.
+  to the dashboard, the same way hotel/airport Wi-Fi login screens pop up. That view
+  is usually a restricted mini-browser, so the dashboard has an "Open in your
+  browser" link to escape into full Safari/Chrome.
 - Shows live pressure, connection info, and log status on the SSD1306 OLED.
 - Updates itself over the air: upload a `.bin` through the dashboard's "Firmware
   Update" card, no USB/PlatformIO required.

@@ -65,6 +65,8 @@ reports the full `ap_ssid` string.
 
 A `DNSServer` on port 53 (`dnsServer.start(DnsPort, "*", WiFi.softAPIP())`, serviced by `dnsServer.processNextRequest()` in `loop()`) resolves every DNS query to the board's own IP. Combined with `server.onNotFound(handleRoot)`, this means the OS's "is this network captive?" probe (e.g. iOS's `captive.apple.com/hotspot-detect.html`, Android's `connectivitycheck.gstatic.com/generate_204`) gets served the dashboard instead of the expected response, which is what makes phones auto-pop a mini-browser to it on connecting — the same UX as hotel/airport Wi-Fi logins. A phone that already joined this exact SSID successfully before this feature existed may have it cached as "no login needed" and skip the check on rejoin; forgetting and rejoining the network resets that.
 
+Since captive-portal mini-browsers are typically restricted (no tabs, no bookmarking, limited chrome), the dashboard has an "Open in your browser" link near the top with `target="_blank"`. Captive-portal webviews don't implement opening a new tab themselves, so they hand the request off to the real system browser instead — that's the whole mechanism, no special detection needed. Keep that `target="_blank"` if editing this link; without it, the link just reloads inside the same restricted view.
+
 ## Firmware versioning & releases
 
 `scripts/get_firmware_version.py` (a PlatformIO `pre:` extra script, wired in via
