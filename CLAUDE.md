@@ -58,6 +58,22 @@ reports the full `ap_ssid` string.
 - `GET /settime?epoch=<unix seconds>` — sets the software clock (browser sends local wall-clock time, already timezone-shifted)
 - `GET /resetlog` — truncates the CSV log and restarts the row counter
 - `GET /setinterval?ms=<n>` — sets the logging interval (persisted to flash via `Preferences`)
+- `POST /update` — OTA firmware upload (multipart `.bin`, dashboard's "Firmware Update" card); flashes via `Update.h` and reboots
+
+## Firmware versioning & releases
+
+`scripts/get_firmware_version.py` (a PlatformIO `pre:` extra script, wired in via
+`extra_scripts` in `platformio.ini`) injects a `FIRMWARE_VERSION` macro from `git
+describe --tags --always --dirty` at build time — visible in the boot log, `/status`,
+and the dashboard footer. Since builds run through this script, don't add a second,
+manually-maintained version constant.
+
+`.github/workflows/release.yml` builds the firmware in CI on every push of a `v*`
+tag and publishes a GitHub Release with the `.bin` attached (via
+`softprops/action-gh-release`); a manual `workflow_dispatch` run instead uploads a
+plain build artifact. `board_build.partitions = default_16MB.csv` in `platformio.ini`
+is required for OTA (`Update.h` needs the `ota_0`/`ota_1` slots that partition table
+provides — the board's default one doesn't have them).
 
 ## Where things stand
 

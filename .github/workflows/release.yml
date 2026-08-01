@@ -1,0 +1,48 @@
+name: Release firmware
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write  # needed to create the GitHub Release and attach the .bin
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so `git describe` matches local builds
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Rename firmware binary
+        run: |
+          version="${GITHUB_REF_NAME:-$(git describe --tags --always --dirty)}"
+          cp .pio/build/esp32dev/firmware.bin "irrigation-pressure-logger-${version}.bin"
+          echo "ASSET_PATH=irrigation-pressure-logger-${version}.bin" >> "$GITHUB_ENV"
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_PATH }}
+          generate_release_notes: true
+
+      - name: Upload build artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: ${{ env.ASSET_PATH }}

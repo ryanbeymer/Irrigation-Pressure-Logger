@@ -7,6 +7,12 @@
 #include <WiFi.h>
 #include <Wire.h>
 
+// Injected by scripts/get_firmware_version.py from `git describe` at build
+// time (e.g. "v1.2.0", "v1.2.0-3-gabc1234", or "abc1234-dirty" without a tag).
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "unknown"
+#endif
+
 constexpr uint32_t SerialBaud = 115200;
 // The broadcast SSID gets a "-<last 6 MAC hex chars>" suffix (set in setup())
 // so multiple loggers can be told apart on the same site.
@@ -444,7 +450,7 @@ void handleRoot() {
     <span class="msg" id="fwmsg"></span>
   </div>
 
-  <footer>IrrigationLogger &middot; 192.168.4.1</footer>
+  <footer>IrrigationLogger &middot; 192.168.4.1 &middot; <span id="fwver">--</span></footer>
 </div>
 <script>
   function pad(n){return String(n).padStart(2,"0");}
@@ -466,6 +472,7 @@ void handleRoot() {
     setPill("p-rtc",j.rtc_ready);
     document.getElementById("rows").textContent=j.logged_rows;
     document.getElementById("logtime").textContent=j.timestamp;
+    document.getElementById("fwver").textContent=j.firmware_version;
     // Sync the dropdown to the saved interval once, so we don't fight the user.
     if(!intervalLoaded && j.log_interval_ms){
       document.getElementById("loginterval").value=String(j.log_interval_ms);
@@ -587,6 +594,7 @@ void handleRoot() {
 void handleStatus() {
   const String json =
       String("{\"status\":\"ok\",") +
+      "\"firmware_version\":\"" + FIRMWARE_VERSION + "\"," +
       "\"ap_ssid\":\"" + apSsid + "\"," +
       "\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\"," +
       "\"i2c_sda\":" + String(I2cSdaPin) + "," +
@@ -730,6 +738,7 @@ void setup() {
   delay(100);
   Serial.println();
   Serial.println("Irrigation Logger minimal firmware starting");
+  Serial.printf("Firmware version: %s\n", FIRMWARE_VERSION);
 
   prefs.begin("logger", false);
   logIntervalMs = prefs.getULong("logMs", DefaultLogIntervalMs);

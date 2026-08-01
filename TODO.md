@@ -29,6 +29,17 @@ USB port used for flashing.
   `.bin` to `POST /update`, which flashes it via the `Update` library and reboots.
   Requires `board_build.partitions = default_16MB.csv` (adds the ota_0/ota_1 slots
   Update.h needs — the board's default partition table doesn't have them).
+- Firmware is versioned from git: `scripts/get_firmware_version.py` (a PlatformIO
+  `pre:` extra script) injects `FIRMWARE_VERSION` from `git describe --tags --always
+  --dirty` at build time. Shows in the boot log, `/status` (`firmware_version`), and
+  the dashboard footer — check it after an OTA flash to confirm the new build landed.
+  No tags exist yet, so local builds currently show a bare commit hash (`+"-dirty"` if
+  the working tree has uncommitted changes) rather than a version like `v1.0.0`.
+- `.github/workflows/release.yml` builds the firmware in CI and publishes it: pushing
+  a `v*` tag (e.g. `v1.0.0`) creates a GitHub Release with the `.bin` attached (named
+  `irrigation-pressure-logger-<tag>.bin`); a manual run (Actions tab → "Run workflow")
+  instead uploads it as a plain build artifact. This is the intended way to get a
+  `.bin` onto the OTA page without a local PlatformIO build.
 - Local status page is available at `http://192.168.4.1`.
 - JSON status is available at `http://192.168.4.1/status`.
 - I2C bus scan runs cleanly on GPIO 15 (SDA) / GPIO 7 (SCL) — no ADS1115/OLED
@@ -123,8 +134,10 @@ Card must be FAT32.
 5. Test the OTA updater end-to-end from a phone or second device (this Mac can't
    test it directly — joining the AP drops the internet connection this session
    needs).
-6. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
-7. Clean up the firmware into modules after the hardware path is proven.
+6. Push a `v0.1.0` tag (or run the release workflow manually) to confirm the GitHub
+   Actions release process actually produces a working `.bin` end-to-end.
+7. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
+8. Clean up the firmware into modules after the hardware path is proven.
 
 ## Calibration Notes
 
