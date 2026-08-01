@@ -75,6 +75,26 @@ plain build artifact. `board_build.partitions = default_16MB.csv` in `platformio
 is required for OTA (`Update.h` needs the `ota_0`/`ota_1` slots that partition table
 provides — the board's default one doesn't have them).
 
+## Cutting a release
+
+This is part of the normal workflow, not a one-off: when a meaningful chunk of work
+lands on `main` and the user has confirmed it works (a hardware port, a new feature,
+a real bug fix — not every small commit), tag it and push the tag to trigger
+`.github/workflows/release.yml`:
+
+```sh
+git tag -a vX.Y.Z -m "short summary of what changed"
+git push origin vX.Y.Z
+```
+
+There's no strict SemVer contract here yet — bump patch for fixes, minor for new
+features/hardware support, major for breaking wiring/pin changes. **Proactively
+suggest cutting a release** once a change is committed and confirmed working, rather
+than waiting for the user to ask — the release page is the intended way to get a
+`.bin` onto the OTA update page (see "Firmware versioning & releases" above), so a
+feature isn't really "done" for OTA purposes until it's tagged. Still confirm with
+the user before tagging/pushing, same as any other push.
+
 ## Where things stand
 
 `TODO.md` is an active work list, not an append-only log: when a step is done, **remove it** so the file only ever shows outstanding work. Durable facts (confirmed wiring, calibration notes, observed readings) stay. `README.md` describes the intended full logger. When hardware or wiring facts change, update `TODO.md`.
