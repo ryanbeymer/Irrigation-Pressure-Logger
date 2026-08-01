@@ -33,13 +33,16 @@ USB port used for flashing.
   `pre:` extra script) injects `FIRMWARE_VERSION` from `git describe --tags --always
   --dirty` at build time. Shows in the boot log, `/status` (`firmware_version`), and
   the dashboard footer — check it after an OTA flash to confirm the new build landed.
-  No tags exist yet, so local builds currently show a bare commit hash (`+"-dirty"` if
-  the working tree has uncommitted changes) rather than a version like `v1.0.0`.
 - `.github/workflows/release.yml` builds the firmware in CI and publishes it: pushing
   a `v*` tag (e.g. `v1.0.0`) creates a GitHub Release with the `.bin` attached (named
   `irrigation-pressure-logger-<tag>.bin`); a manual run (Actions tab → "Run workflow")
   instead uploads it as a plain build artifact. This is the intended way to get a
   `.bin` onto the OTA page without a local PlatformIO build.
+- Captive portal: a `DNSServer` on port 53 resolves every hostname to the board's own
+  IP, and `server.onNotFound(handleRoot)` serves the dashboard for any unmatched path
+  (including the OS's captive-check probe URLs). Should make phones auto-open a
+  browser to the dashboard on connecting to the AP, like a hotel/airport Wi-Fi login
+  screen — **not yet verified on a real device** (see Next Steps).
 - Local status page is available at `http://192.168.4.1`.
 - JSON status is available at `http://192.168.4.1/status`.
 - I2C bus scan runs cleanly on GPIO 15 (SDA) / GPIO 7 (SCL) — no ADS1115/OLED
@@ -128,16 +131,12 @@ Card must be FAT32.
    (GPIO 15 SDA / GPIO 7 SCL) and confirm both are detected in the `/status` scan.
 2. Confirm the 5V supply pin for the pressure sensor's red wire on this board.
 3. Insert a FAT32 microSD card and confirm `/download` returns real logged rows.
-4. Confirm the `IrrigationLogger-<MAC suffix>` AP is actually visible over the air
-   from a phone/laptop (only checked via serial log + an inconclusive automated
-   Wi-Fi scan so far).
-5. Test the OTA updater end-to-end from a phone or second device (this Mac can't
-   test it directly — joining the AP drops the internet connection this session
-   needs).
-6. Push a `v0.1.0` tag (or run the release workflow manually) to confirm the GitHub
-   Actions release process actually produces a working `.bin` end-to-end.
-7. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
-8. Clean up the firmware into modules after the hardware path is proven.
+4. Verify the captive portal actually auto-opens a browser on connecting to the AP
+   (tested from a phone that's never joined this exact SSID before — a phone that
+   already joined it successfully pre-captive-portal may have the network cached as
+   "no login needed" and skip the check; "Forget This Network" then rejoin to retest).
+5. Optional: tighten the slope with a higher, steady known-pressure reading (50-70 PSI).
+6. Clean up the firmware into modules after the hardware path is proven.
 
 ## Calibration Notes
 

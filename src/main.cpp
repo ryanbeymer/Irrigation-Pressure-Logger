@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 #include <SD_MMC.h>
 #include <Update.h>
@@ -42,6 +43,12 @@ constexpr int SdmmcCmdPin = 39;
 constexpr int SdmmcDataPin = 40;
 constexpr const char *LogPath = "/pressure_log.csv";
 constexpr const char *CsvHeader = "timestamp,millis,pressure_psi,voltage";
+
+// Captive portal: a DNS server that resolves every hostname to our own IP,
+// so the OS's "is this network captive?" check gets routed to the dashboard
+// instead of the real internet, and the phone auto-opens a browser to it.
+constexpr uint8_t DnsPort = 53;
+DNSServer dnsServer;
 
 WebServer server(80);
 Adafruit_SSD1306 display(OledWidth, OledHeight, &Wire, -1);
@@ -762,6 +769,7 @@ void setup() {
   apSsid = String(ApSsidPrefix) + "-" + macSuffix;
 
   WiFi.softAP(apSsid.c_str());
+  dnsServer.start(DnsPort, "*", WiFi.softAPIP());
   beginDisplay();
 
   server.on("/", HTTP_GET, handleRoot);
@@ -771,6 +779,10 @@ void setup() {
   server.on("/resetlog", HTTP_GET, handleResetLog);
   server.on("/setinterval", HTTP_GET, handleSetInterval);
   server.on("/update", HTTP_POST, handleUpdateResult, handleUpdateUpload);
+  // Any other path (including the OS's captive-portal probe URLs, which
+  // resolve here via the DNS server above) gets the dashboard, which is what
+  // tips off the OS that this network needs a login/portal screen.
+  server.onNotFound(handleRoot);
   server.begin();
 
   Serial.printf("Wi-Fi AP started: %s\n", apSsid.c_str());
@@ -780,6 +792,7 @@ void setup() {
 }
 
 void loop() {
+  dnsServer.processNextRequest();
   server.handleClient();
 
   const unsigned long now = millis();

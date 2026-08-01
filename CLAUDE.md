@@ -59,6 +59,11 @@ reports the full `ap_ssid` string.
 - `GET /resetlog` — truncates the CSV log and restarts the row counter
 - `GET /setinterval?ms=<n>` — sets the logging interval (persisted to flash via `Preferences`)
 - `POST /update` — OTA firmware upload (multipart `.bin`, dashboard's "Firmware Update" card); flashes via `Update.h` and reboots
+- any other path — serves the dashboard (`server.onNotFound(handleRoot)`), so the OS's captive-portal probe requests (routed here by the `DNSServer` in `setup()`, which resolves every hostname to the board's own IP) land on the real page instead of 404ing
+
+## Captive portal
+
+A `DNSServer` on port 53 (`dnsServer.start(DnsPort, "*", WiFi.softAPIP())`, serviced by `dnsServer.processNextRequest()` in `loop()`) resolves every DNS query to the board's own IP. Combined with `server.onNotFound(handleRoot)`, this means the OS's "is this network captive?" probe (e.g. iOS's `captive.apple.com/hotspot-detect.html`, Android's `connectivitycheck.gstatic.com/generate_204`) gets served the dashboard instead of the expected response, which is what makes phones auto-pop a mini-browser to it on connecting — the same UX as hotel/airport Wi-Fi logins. A phone that already joined this exact SSID successfully before this feature existed may have it cached as "no login needed" and skip the check on rejoin; forgetting and rejoining the network resets that.
 
 ## Firmware versioning & releases
 
